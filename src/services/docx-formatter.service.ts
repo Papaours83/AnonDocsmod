@@ -276,6 +276,75 @@ export class DocxFormatterService {
   }
 
   /**
+   * Parse a PII report txt file and return placeholder → original mapping as PiiReplacement[]
+   * Uses the "=== Replacements ===" section with lines "[Placeholder] = original"
+   */
+  parsePiiReport(txtPath: string): PiiReplacement[] {
+    const content = fs.readFileSync(txtPath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const reps: PiiReplacement[] = [];
+    let inReplacements = false;
+    for (const line of lines) {
+      if (/^===\s*Replacements\s*===/i.test(line)) {
+        inReplacements = true;
+        continue;
+      }
+      if (/^===/.test(line)) {
+        inReplacements = false;
+        continue;
+      }
+      if (!inReplacements) continue;
+      const m = line.match(/^(\[[^\]]+\])\s*=\s*(.+)$/);
+      if (m) {
+        reps.push({ original: m[1], anonymized: m[2] });
+      }
+    }
+    return reps;
+  }
+
+  /**
+   * De-anonymize a DOCX: replace placeholders with original values using a PII report
+   */
+  async deanonymizeDocx(
+    inputPath: string,
+    replacements: PiiReplacement[]
+  ): Promise<{ filePath: string; filename: string }> {
+    const data = fs.readFileSync(inputPath);
+    const zip = await JSZip.loadAsync(data);
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+    if (!documentXml) {
+      throw new Error('Invalid DOCX file: word/document.xml not found');
+    }
+    const parsedXml = await parseXml(documentXml);
+    this.applyReplacementsToXml(parsedXml, replacements);
+    const builder = new Builder();
+    const newDocumentXml = builder.buildObject(parsedXml);
+    zip.file('word/document.xml', newDocumentXml);
+    const filename = `deanonymized-${Date.now()}-${Math.round(Math.random() * 1e9)}.docx`;
+    const outputPath = path.join(this.downloadsDir, filename);
+    const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+    fs.writeFileSync(outputPath, buffer);
+    return { filePath: outputPath, filename };
+  }
+
+  /**
+   * De-anonymize plain text content
+   */
+  deanonymizeText(text: string, replacements: PiiReplacement[]): string {
+    return this.replaceAllOccurrences(text, replacements);
+  }
+
+  /**
+   * Write a plain text file (used for de-anonymized TXT output)
+   */
+  writeTextFile(content: string, prefix = 'deanonymized'): { filePath: string; filename: string } {
+    const filename = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}.txt`;
+    const filePath = path.join(this.downloadsDir, filename);
+    fs.writeFileSync(filePath, content, 'utf8');
+    return { filePath, filename };
+  }
+
+  /**
    * Write a PII report as a plain text file to the downloads directory
    */
   writePiiReport(

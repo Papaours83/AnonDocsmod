@@ -21,6 +21,23 @@ router.post('/', upload.single('file'), (req, res) =>
 );
 
 /**
+ * POST /api/document/deanonymize
+ * Restore original values using the PII report (.txt) produced earlier.
+ *
+ * Form data:
+ * - file: anonymized document (.docx or .txt)
+ * - piiReport: PII report .txt
+ */
+router.post(
+  '/deanonymize',
+  upload.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'piiReport', maxCount: 1 },
+  ]),
+  (req, res) => documentController.deanonymizeDocument(req, res)
+);
+
+/**
  * GET /api/document/download/:filename
  * Download anonymized DOCX file
  *

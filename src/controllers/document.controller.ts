@@ -151,6 +151,77 @@ export class DocumentController {
   }
 
   /**
+   * De-anonymize a document using an uploaded PII report (.txt)
+   * Form fields:
+   *  - file: anonymized document (.docx or .txt)
+   *  - piiReport: PII report .txt produced by /api/document
+   */
+  async deanonymizeDocument(req: Request, res: Response): Promise<void> {
+    const files = req.files as { [k: string]: Express.Multer.File[] } | undefined;
+    const docFile = files?.file?.[0];
+    const reportFile = files?.piiReport?.[0];
+
+    try {
+      if (!docFile || !reportFile) {
+        res.status(400).json({ error: 'Both "file" and "piiReport" must be uploaded' });
+        return;
+      }
+
+      if (!reportFile.originalname.toLowerCase().endsWith('.txt')) {
+        res.status(400).json({ error: 'piiReport must be a .txt file' });
+        return;
+      }
+
+      const replacements = docxFormatterService.parsePiiReport(reportFile.path);
+      if (replacements.length === 0) {
+        res.status(400).json({ error: 'No replacements found in PII report' });
+        return;
+      }
+
+      const protocol = req.get('x-forwarded-proto') || req.protocol;
+      const host = req.get('host');
+      const docName = docFile.originalname.toLowerCase();
+
+      if (docName.endsWith('.docx')) {
+        const { filename } = await docxFormatterService.deanonymizeDocx(docFile.path, replacements);
+        const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
+        res.json({
+          success: true,
+          data: {
+            downloadUrl,
+            filename,
+            replacementsApplied: replacements.length,
+          },
+        });
+      } else if (docName.endsWith('.txt')) {
+        const content = fs.readFileSync(docFile.path, 'utf8');
+        const restored = docxFormatterService.deanonymizeText(content, replacements);
+        const { filename } = docxFormatterService.writeTextFile(restored);
+        const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
+        res.json({
+          success: true,
+          data: {
+            downloadUrl,
+            filename,
+            replacementsApplied: replacements.length,
+          },
+        });
+      } else {
+        res.status(400).json({ error: 'file must be a .docx or .txt' });
+      }
+    } catch (error) {
+      console.error('Error in deanonymizeDocument controller:', error);
+      res.status(500).json({
+        error: 'Failed to deanonymize document',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      if (docFile && fs.existsSync(docFile.path)) fs.unlinkSync(docFile.path);
+      if (reportFile && fs.existsSync(reportFile.path)) fs.unlinkSync(reportFile.path);
+    }
+  }
+
+  /**
    * Download anonymized DOCX file
    */
   async downloadDocument(req: Request, res: Response): Promise<void> {
