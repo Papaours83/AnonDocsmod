@@ -4,6 +4,7 @@ import { parserService } from '../services/parser.service';
 import { docxFormatterService } from '../services/docx-formatter.service';
 import { LLMProvider } from '../services/llm.service';
 import fs from 'fs';
+import JSZip from 'jszip';
 
 export class DocumentController {
   /**
@@ -84,29 +85,30 @@ export class DocumentController {
     // Clean up uploaded file
     fs.unlinkSync(req.file.path);
 
-    // Construct download URL (respect X-Forwarded-Proto from reverse proxy)
-    const protocol = req.get('x-forwarded-proto') || req.protocol;
-    const host = req.get('host');
-    const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
-
     // Generate PII report txt
     const piiReport = docxFormatterService.writePiiReport(
       result.piiDetected as any,
       result.replacements
     );
-    const piiDownloadUrl = `${protocol}://${host}/api/document/download/${piiReport.filename}`;
 
-    res.json({
-      success: true,
-      data: {
-        ...result,
-        downloadUrl,
-        filename,
-        piiDownloadUrl,
-        piiFilename: piiReport.filename,
-        originalFilename: req.file.originalname,
-      },
-    });
+    // Stream a zip containing the anonymized docx + pii report
+    const baseName = req.file.originalname.replace(/\.docx$/i, '');
+    const zip = new JSZip();
+    zip.file(
+      `${baseName}-anonymized.docx`,
+      fs.readFileSync(docxFormatterService.getFilePath(filename))
+    );
+    zip.file(
+      `${baseName}-pii.txt`,
+      fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
+    );
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}-anonymized.zip"`);
+    res.setHeader('X-Anonymized-Filename', filename);
+    res.setHeader('X-Pii-Filename', piiReport.filename);
+    res.send(zipBuffer);
   }
 
   /**
@@ -136,18 +138,24 @@ export class DocumentController {
       result.piiDetected as any,
       result.replacements
     );
-    const protocol = req.get('x-forwarded-proto') || req.protocol;
-    const host = req.get('host');
-    const piiDownloadUrl = `${protocol}://${host}/api/document/download/${piiReport.filename}`;
 
-    res.json({
-      success: true,
-      data: {
-        ...result,
-        piiDownloadUrl,
-        piiFilename: piiReport.filename,
-      },
-    });
+    // Write anonymized text to a .txt file and zip both
+    const anonTxt = docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
+    const baseName = req.file.originalname.replace(/\.(pdf|txt)$/i, '');
+
+    const zip = new JSZip();
+    zip.file(`${baseName}-anonymized.txt`, fs.readFileSync(anonTxt.filePath));
+    zip.file(
+      `${baseName}-pii.txt`,
+      fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
+    );
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}-anonymized.zip"`);
+    res.setHeader('X-Anonymized-Filename', anonTxt.filename);
+    res.setHeader('X-Pii-Filename', piiReport.filename);
+    res.send(zipBuffer);
   }
 
   /**
@@ -178,34 +186,37 @@ export class DocumentController {
         return;
       }
 
-      const protocol = req.get('x-forwarded-proto') || req.protocol;
-      const host = req.get('host');
       const docName = docFile.originalname.toLowerCase();
+      const baseName = docFile.originalname.replace(/\.(docx|txt)$/i, '');
 
       if (docName.endsWith('.docx')) {
-        const { filename } = await docxFormatterService.deanonymizeDocx(docFile.path, replacements);
-        const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
-        res.json({
-          success: true,
-          data: {
-            downloadUrl,
-            filename,
-            replacementsApplied: replacements.length,
-          },
-        });
+        const { filePath, filename } = await docxFormatterService.deanonymizeDocx(
+          docFile.path,
+          replacements
+        );
+        res.setHeader(
+          'Content-Type',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        );
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="deanonymized-${baseName}.docx"`
+        );
+        res.setHeader('X-Replacements-Applied', String(replacements.length));
+        res.setHeader('X-Generated-Filename', filename);
+        fs.createReadStream(filePath).pipe(res);
       } else if (docName.endsWith('.txt')) {
         const content = fs.readFileSync(docFile.path, 'utf8');
         const restored = docxFormatterService.deanonymizeText(content, replacements);
-        const { filename } = docxFormatterService.writeTextFile(restored);
-        const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
-        res.json({
-          success: true,
-          data: {
-            downloadUrl,
-            filename,
-            replacementsApplied: replacements.length,
-          },
-        });
+        const { filePath, filename } = docxFormatterService.writeTextFile(restored);
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="deanonymized-${baseName}.txt"`
+        );
+        res.setHeader('X-Replacements-Applied', String(replacements.length));
+        res.setHeader('X-Generated-Filename', filename);
+        fs.createReadStream(filePath).pipe(res);
       } else {
         res.status(400).json({ error: 'file must be a .docx or .txt' });
       }

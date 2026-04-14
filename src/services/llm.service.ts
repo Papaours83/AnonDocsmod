@@ -110,7 +110,8 @@ export class LLMService {
       );
     }
 
-    const systemPrompt = `You are an expert document anonymization assistant. Your task is to:
+    const systemPrompt = `/no_think
+You are an expert document anonymization assistant. Your task is to:
 1. Identify and remove all Personally Identifiable Information (PII) from the text
 2. Replace PII with generic placeholders like [NAME], [ADDRESS], [EMAIL], [PHONE], [DATE], [ORGANIZATION]
 3. Maintain the document's structure and readability
@@ -155,7 +156,11 @@ Respond with a JSON object in this exact format:
 
     try {
       const response = await model.invoke(messages);
-      const content = response.content.toString();
+      let content = response.content.toString();
+
+      // Strip Qwen/DeepSeek-style <think>...</think> reasoning blocks (and unterminated ones)
+      content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+      content = content.replace(/<think>[\s\S]*$/i, '');
 
       try {
         // Extract JSON from response (handle cases where LLM adds markdown formatting)
