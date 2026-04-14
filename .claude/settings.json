@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls docker-compose* .env*)",
+      "Bash(docker --version)",
+      "Bash(docker build:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker run:*)"
+    ]
+  }
+}
