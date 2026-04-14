@@ -111,40 +111,74 @@ export class AnonymizationService {
         }
       }
 
-      // Aggregate results
+      // Aggregate results with global numbered placeholders ([Name1], [Name2], ...)
       const anonymizedChunks: string[] = [];
       const allReplacements: PiiReplacement[] = [];
+      const globalMap = new Map<string, string>();
+      const counters: Record<string, number> = {};
+
+      const categoryFromPlaceholder = (ph: string): string => {
+        const m = ph.match(/\[([A-Za-z_ ]+?)\d*\]/);
+        if (!m) return 'Other';
+        const raw = m[1].trim().toLowerCase().replace(/[_\s]/g, '');
+        const mapping: Record<string, string> = {
+          name: 'Name',
+          names: 'Name',
+          personname: 'Name',
+          address: 'Address',
+          addresses: 'Address',
+          email: 'Email',
+          emails: 'Email',
+          phone: 'Phone',
+          phonenumber: 'Phone',
+          phonenumbers: 'Phone',
+          date: 'Date',
+          dates: 'Date',
+          organization: 'Organization',
+          organizations: 'Organization',
+          org: 'Organization',
+          id: 'Id',
+          other: 'Other',
+        };
+        return (
+          mapping[raw] ||
+          m[1].trim().charAt(0).toUpperCase() + m[1].trim().slice(1).toLowerCase()
+        );
+      };
 
       for (const result of results) {
-        anonymizedChunks.push(result.anonymizedText);
+        let chunkText = result.anonymizedText;
 
-        // Aggregate PII detected across all chunks (handle missing properties)
-        if (result.piiDetected.names) {
-          allPiiDetected.names.push(...result.piiDetected.names);
-        }
-        if (result.piiDetected.addresses) {
+        if (result.piiDetected.names) allPiiDetected.names.push(...result.piiDetected.names);
+        if (result.piiDetected.addresses)
           allPiiDetected.addresses.push(...result.piiDetected.addresses);
-        }
-        if (result.piiDetected.emails) {
-          allPiiDetected.emails.push(...result.piiDetected.emails);
-        }
-        if (result.piiDetected.phoneNumbers) {
+        if (result.piiDetected.emails) allPiiDetected.emails.push(...result.piiDetected.emails);
+        if (result.piiDetected.phoneNumbers)
           allPiiDetected.phoneNumbers.push(...result.piiDetected.phoneNumbers);
-        }
-        if (result.piiDetected.dates) {
-          allPiiDetected.dates.push(...result.piiDetected.dates);
-        }
-        if (result.piiDetected.organizations) {
+        if (result.piiDetected.dates) allPiiDetected.dates.push(...result.piiDetected.dates);
+        if (result.piiDetected.organizations)
           allPiiDetected.organizations.push(...result.piiDetected.organizations);
-        }
-        if (result.piiDetected.other) {
-          allPiiDetected.other.push(...result.piiDetected.other);
+        if (result.piiDetected.other) allPiiDetected.other.push(...result.piiDetected.other);
+
+        const chunkReplacements = result.replacements || [];
+        for (const rep of chunkReplacements) {
+          const category = categoryFromPlaceholder(rep.anonymized);
+          const key = `${category}|${rep.original.trim().toLowerCase()}`;
+          let newPh = globalMap.get(key);
+          if (!newPh) {
+            counters[category] = (counters[category] || 0) + 1;
+            newPh = `[${category}${counters[category]}]`;
+            globalMap.set(key, newPh);
+          }
+          const idx = chunkText.indexOf(rep.anonymized);
+          if (idx !== -1) {
+            chunkText =
+              chunkText.slice(0, idx) + newPh + chunkText.slice(idx + rep.anonymized.length);
+          }
+          allReplacements.push({ original: rep.original, anonymized: newPh });
         }
 
-        // Aggregate replacements
-        if (result.replacements) {
-          allReplacements.push(...result.replacements);
-        }
+        anonymizedChunks.push(chunkText);
       }
 
       // Combine anonymized chunks

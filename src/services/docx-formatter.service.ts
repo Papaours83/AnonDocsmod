@@ -276,6 +276,34 @@ export class DocxFormatterService {
   }
 
   /**
+   * Write a PII report as a plain text file to the downloads directory
+   */
+  writePiiReport(
+    piiDetected: Record<string, string[]>,
+    replacements: PiiReplacement[]
+  ): { filePath: string; filename: string } {
+    const filename = `pii-${Date.now()}-${Math.round(Math.random() * 1e9)}.txt`;
+    const filePath = path.join(this.downloadsDir, filename);
+
+    const lines: string[] = [];
+    lines.push('=== PII Detected ===', '');
+    for (const [category, items] of Object.entries(piiDetected)) {
+      if (!items || items.length === 0) continue;
+      lines.push(`[${category}]`);
+      for (const item of items) lines.push(`  - ${item}`);
+      lines.push('');
+    }
+
+    lines.push('=== Replacements ===', '');
+    for (const rep of replacements) {
+      lines.push(`${rep.anonymized} = ${rep.original}`);
+    }
+
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    return { filePath, filename };
+  }
+
+  /**
    * Check if file exists
    */
   fileExists(filename: string): boolean {

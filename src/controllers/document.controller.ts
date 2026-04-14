@@ -89,12 +89,21 @@ export class DocumentController {
     const host = req.get('host');
     const downloadUrl = `${protocol}://${host}/api/document/download/${filename}`;
 
+    // Generate PII report txt
+    const piiReport = docxFormatterService.writePiiReport(
+      result.piiDetected as any,
+      result.replacements
+    );
+    const piiDownloadUrl = `${protocol}://${host}/api/document/download/${piiReport.filename}`;
+
     res.json({
       success: true,
       data: {
         ...result,
         downloadUrl,
         filename,
+        piiDownloadUrl,
+        piiFilename: piiReport.filename,
         originalFilename: req.file.originalname,
       },
     });
@@ -122,9 +131,22 @@ export class DocumentController {
     // Anonymize the text
     const result = await anonymizationService.anonymizeText(text, provider);
 
+    // Generate PII report txt
+    const piiReport = docxFormatterService.writePiiReport(
+      result.piiDetected as any,
+      result.replacements
+    );
+    const protocol = req.get('x-forwarded-proto') || req.protocol;
+    const host = req.get('host');
+    const piiDownloadUrl = `${protocol}://${host}/api/document/download/${piiReport.filename}`;
+
     res.json({
       success: true,
-      data: result,
+      data: {
+        ...result,
+        piiDownloadUrl,
+        piiFilename: piiReport.filename,
+      },
     });
   }
 
@@ -143,10 +165,12 @@ export class DocumentController {
         return;
       }
 
-      // Only allow DOCX downloads
-      if (!filename.endsWith('.docx')) {
+      // Only allow DOCX or TXT downloads
+      const isDocx = filename.endsWith('.docx');
+      const isTxt = filename.endsWith('.txt');
+      if (!isDocx && !isTxt) {
         res.status(400).json({
-          error: 'Only DOCX files can be downloaded',
+          error: 'Only DOCX or TXT files can be downloaded',
         });
         return;
       }
@@ -164,7 +188,9 @@ export class DocumentController {
       // Set headers for download
       res.setHeader(
         'Content-Type',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        isDocx
+          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : 'text/plain; charset=utf-8'
       );
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
