@@ -21,6 +21,9 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+# curl for healthchecks (required by Coolify)
+RUN apk add --no-cache curl
+
 # Install production dependencies only
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
@@ -39,7 +42,7 @@ EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD curl -fsS "http://localhost:${PORT:-3000}/health" || exit 1
 
 # Start application
 CMD ["node", "dist/index.js"]
