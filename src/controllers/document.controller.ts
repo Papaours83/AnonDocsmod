@@ -95,17 +95,17 @@ export class DocumentController {
     const baseName = req.file.originalname.replace(/\.docx$/i, '');
     const zip = new JSZip();
     zip.file(
-      `${baseName}-anonymized.docx`,
+      `anonymized-${baseName}.docx`,
       fs.readFileSync(docxFormatterService.getFilePath(filename))
     );
     zip.file(
-      `${baseName}-pii.txt`,
+      `pii-${baseName}.txt`,
       fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
     );
     const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
 
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${baseName}-anonymized.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
     res.setHeader('X-Anonymized-Filename', filename);
     res.setHeader('X-Pii-Filename', piiReport.filename);
     res.send(zipBuffer);
@@ -144,15 +144,15 @@ export class DocumentController {
     const baseName = req.file.originalname.replace(/\.(pdf|txt)$/i, '');
 
     const zip = new JSZip();
-    zip.file(`${baseName}-anonymized.txt`, fs.readFileSync(anonTxt.filePath));
+    zip.file(`anonymized-${baseName}.txt`, fs.readFileSync(anonTxt.filePath));
     zip.file(
-      `${baseName}-pii.txt`,
+      `pii-${baseName}.txt`,
       fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
     );
     const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
 
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${baseName}-anonymized.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
     res.setHeader('X-Anonymized-Filename', anonTxt.filename);
     res.setHeader('X-Pii-Filename', piiReport.filename);
     res.send(zipBuffer);
