@@ -112,10 +112,12 @@ export class DocumentController {
   }
 
   /**
-   * Handle PDF/TXT files - return plain text only
+   * Handle PDF/TXT files - PDF is regenerated as PDF, TXT stays as TXT.
    */
   private async handlePlainText(req: Request, res: Response, provider: LLMProvider): Promise<void> {
     if (!req.file) return;
+
+    const isPdf = req.file.mimetype === 'application/pdf';
 
     // Parse document to extract text
     const text = await parserService.parseDocument(req.file.path, req.file.mimetype);
@@ -139,12 +141,15 @@ export class DocumentController {
       result.replacements
     );
 
-    // Write anonymized text to a .txt file and zip both
-    const anonTxt = docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
+    // Write anonymized content — PDF input -> PDF output, TXT input -> TXT output
     const baseName = req.file.originalname.replace(/\.(pdf|txt)$/i, '');
+    const anonOut = isPdf
+      ? await docxFormatterService.writePdfFile(result.anonymizedText, 'anonymized')
+      : docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
+    const anonExt = isPdf ? 'pdf' : 'txt';
 
     const zip = new JSZip();
-    zip.file(`anonymized-${baseName}.txt`, fs.readFileSync(anonTxt.filePath));
+    zip.file(`anonymized-${baseName}.${anonExt}`, fs.readFileSync(anonOut.filePath));
     zip.file(
       `pii-${baseName}.txt`,
       fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
@@ -153,7 +158,7 @@ export class DocumentController {
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
-    res.setHeader('X-Anonymized-Filename', anonTxt.filename);
+    res.setHeader('X-Anonymized-Filename', anonOut.filename);
     res.setHeader('X-Pii-Filename', piiReport.filename);
     res.send(zipBuffer);
   }
