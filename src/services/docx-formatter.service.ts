@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import JSZip from 'jszip';
+import PDFDocument from 'pdfkit';
 import { parseString, Builder } from 'xml2js';
 import { promisify } from 'util';
 import { PiiReplacement } from './llm.service';
@@ -342,6 +343,30 @@ export class DocxFormatterService {
     const filePath = path.join(this.downloadsDir, filename);
     fs.writeFileSync(filePath, content, 'utf8');
     return { filePath, filename };
+  }
+
+  /**
+   * Write plain text content as a PDF file.
+   * Formatting from the original PDF cannot be recovered from extracted text —
+   * the output is a simple single-font layout.
+   */
+  writePdfFile(
+    content: string,
+    prefix = 'deanonymized'
+  ): Promise<{ filePath: string; filename: string }> {
+    const filename = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
+    const filePath = path.join(this.downloadsDir, filename);
+
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ margin: 50 });
+      const stream = fs.createWriteStream(filePath);
+      stream.on('finish', () => resolve({ filePath, filename }));
+      stream.on('error', reject);
+      doc.on('error', reject);
+      doc.pipe(stream);
+      doc.font('Helvetica').fontSize(11).text(content, { align: 'left' });
+      doc.end();
+    });
   }
 
   /**

@@ -164,8 +164,8 @@ export class DocumentController {
    *  - file: anonymized document (.docx, .txt or .pdf)
    *  - piiReport: PII report .txt produced by /api/document
    *
-   * Note: PDF input is restored as .txt (no PDF regeneration), matching the
-   * anonymization flow where PDFs also produce a .txt output.
+   * Note: PDF input is regenerated as a plain PDF — original formatting
+   * cannot be recovered from extracted text.
    */
   async deanonymizeDocument(req: Request, res: Response): Promise<void> {
     const files = req.files as { [k: string]: Express.Multer.File[] } | undefined;
@@ -227,15 +227,14 @@ export class DocumentController {
           return;
         }
         const restored = docxFormatterService.deanonymizeText(content, replacements);
-        const { filePath, filename } = docxFormatterService.writeTextFile(restored);
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        const { filePath, filename } = await docxFormatterService.writePdfFile(restored);
+        res.setHeader('Content-Type', 'application/pdf');
         res.setHeader(
           'Content-Disposition',
-          `attachment; filename="deanonymized-${baseName}.txt"`
+          `attachment; filename="deanonymized-${baseName}.pdf"`
         );
         res.setHeader('X-Replacements-Applied', String(replacements.length));
         res.setHeader('X-Generated-Filename', filename);
-        res.setHeader('X-Source-Format', 'pdf');
         fs.createReadStream(filePath).pipe(res);
       } else {
         res.status(400).json({ error: 'file must be a .docx, .txt or .pdf' });
