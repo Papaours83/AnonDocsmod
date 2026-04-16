@@ -25,8 +25,10 @@ router.post('/', upload.single('file'), (req, res) =>
  * Restore original values using the PII report (.txt) produced earlier.
  *
  * Form data:
- * - file: anonymized document (.docx or .txt)
+ * - file: anonymized document (.docx, .txt or .pdf)
  * - piiReport: PII report .txt
+ *
+ * Output: .docx for DOCX input, .txt otherwise (PDF is restored as .txt).
  */
 router.post(
   '/deanonymize',
