@@ -35,11 +35,15 @@ export class DocumentController {
         return;
       }
 
+      const isPdf = mimeType === 'application/pdf';
       if (isDocx) {
         // Handle DOCX: preserve formatting
         await this.handleDocx(req, res, provider as LLMProvider);
+      } else if (isPdf) {
+        // Handle PDF: preserve layout via structured extraction
+        await this.handlePdf(req, res, provider as LLMProvider);
       } else {
-        // Handle PDF/TXT: plain text only
+        // Handle TXT: plain text
         await this.handlePlainText(req, res, provider as LLMProvider);
       }
     } catch (error) {
@@ -112,44 +116,80 @@ export class DocumentController {
   }
 
   /**
-   * Handle PDF/TXT files - PDF is regenerated as PDF, TXT stays as TXT.
+   * Handle PDF files with layout preservation.
+   * Extracts text with per-item coordinates via pdfjs-dist, runs the LLM on
+   * the flattened text, applies the resulting replacements to every item in
+   * place, and rewrites the PDF at the same positions — so pagination and
+   * box/table content stay put.
    */
-  private async handlePlainText(req: Request, res: Response, provider: LLMProvider): Promise<void> {
+  private async handlePdf(req: Request, res: Response, provider: LLMProvider): Promise<void> {
     if (!req.file) return;
 
-    const isPdf = req.file.mimetype === 'application/pdf';
+    const structure = await parserService.parsePdfStructured(req.file.path);
+    const flatText = parserService.flattenPdfStructure(structure);
 
-    // Parse document to extract text
-    const text = await parserService.parseDocument(req.file.path, req.file.mimetype);
-
-    // Clean up uploaded file immediately
     fs.unlinkSync(req.file.path);
 
-    if (!text || text.trim().length === 0) {
-      res.status(400).json({
-        error: 'Could not extract text from document',
-      });
+    if (!flatText || flatText.trim().length === 0) {
+      res.status(400).json({ error: 'Could not extract text from PDF' });
       return;
     }
 
-    // Anonymize the text
-    const result = await anonymizationService.anonymizeText(text, provider);
+    const result = await anonymizationService.anonymizeText(flatText, provider);
 
-    // Generate PII report txt
     const piiReport = docxFormatterService.writePiiReport(
       result.piiDetected as any,
       result.replacements
     );
 
-    // Write anonymized content — PDF input -> PDF output, TXT input -> TXT output
-    const baseName = req.file.originalname.replace(/\.(pdf|txt)$/i, '');
-    const anonOut = isPdf
-      ? await docxFormatterService.writePdfFile(result.anonymizedText, 'anonymized')
-      : docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
-    const anonExt = isPdf ? 'pdf' : 'txt';
+    const anonOut = await docxFormatterService.writePdfFromStructured(
+      structure,
+      result.replacements,
+      'anonymized'
+    );
+
+    const baseName = req.file.originalname.replace(/\.pdf$/i, '');
+    const zip = new JSZip();
+    zip.file(`anonymized-${baseName}.pdf`, fs.readFileSync(anonOut.filePath));
+    zip.file(
+      `pii-${baseName}.txt`,
+      fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
+    );
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
+    res.setHeader('X-Anonymized-Filename', anonOut.filename);
+    res.setHeader('X-Pii-Filename', piiReport.filename);
+    res.send(zipBuffer);
+  }
+
+  /**
+   * Handle TXT files.
+   */
+  private async handlePlainText(req: Request, res: Response, provider: LLMProvider): Promise<void> {
+    if (!req.file) return;
+
+    const text = await parserService.parseDocument(req.file.path, req.file.mimetype);
+    fs.unlinkSync(req.file.path);
+
+    if (!text || text.trim().length === 0) {
+      res.status(400).json({ error: 'Could not extract text from document' });
+      return;
+    }
+
+    const result = await anonymizationService.anonymizeText(text, provider);
+
+    const piiReport = docxFormatterService.writePiiReport(
+      result.piiDetected as any,
+      result.replacements
+    );
+
+    const baseName = req.file.originalname.replace(/\.txt$/i, '');
+    const anonOut = docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
 
     const zip = new JSZip();
-    zip.file(`anonymized-${baseName}.${anonExt}`, fs.readFileSync(anonOut.filePath));
+    zip.file(`anonymized-${baseName}.txt`, fs.readFileSync(anonOut.filePath));
     zip.file(
       `pii-${baseName}.txt`,
       fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
@@ -168,9 +208,6 @@ export class DocumentController {
    * Form fields:
    *  - file: anonymized document (.docx, .txt or .pdf)
    *  - piiReport: PII report .txt produced by /api/document
-   *
-   * Note: PDF input is regenerated as a plain PDF — original formatting
-   * cannot be recovered from extracted text.
    */
   async deanonymizeDocument(req: Request, res: Response): Promise<void> {
     const files = req.files as { [k: string]: Express.Multer.File[] } | undefined;
@@ -226,13 +263,16 @@ export class DocumentController {
         res.setHeader('X-Generated-Filename', filename);
         fs.createReadStream(filePath).pipe(res);
       } else if (docName.endsWith('.pdf')) {
-        const content = await parserService.parseDocument(docFile.path, 'application/pdf');
-        if (!content || content.trim().length === 0) {
+        const structure = await parserService.parsePdfStructured(docFile.path);
+        if (!structure.pages.length) {
           res.status(400).json({ error: 'Could not extract text from PDF' });
           return;
         }
-        const restored = docxFormatterService.deanonymizeText(content, replacements);
-        const { filePath, filename } = await docxFormatterService.writePdfFile(restored);
+        const { filePath, filename } = await docxFormatterService.writePdfFromStructured(
+          structure,
+          replacements,
+          'deanonymized'
+        );
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader(
           'Content-Disposition',

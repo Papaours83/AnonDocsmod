@@ -5,6 +5,7 @@ import PDFDocument from 'pdfkit';
 import { parseString, Builder } from 'xml2js';
 import { promisify } from 'util';
 import { PiiReplacement } from './llm.service';
+import { PdfStructure } from './parser.service';
 
 const parseXml = promisify(parseString);
 
@@ -48,6 +49,11 @@ export class DocxFormatterService {
 
       // Apply replacements directly to text nodes
       this.applyReplacementsToXml(parsedXml, replacements);
+
+      // Second pass: catch PII split across multiple <w:t> siblings within a
+      // paragraph (common when formatting changes mid-word, e.g. a bolded
+      // surname). Only affected paragraphs are rewritten.
+      this.applyReplacementsAcrossRuns(parsedXml, replacements);
 
       // Convert back to XML
       const builder = new Builder();
@@ -212,6 +218,100 @@ export class DocxFormatterService {
   }
 
   /**
+   * Walk the XML tree and, for every paragraph (<w:p>), concatenate the text
+   * from all descendant <w:t> nodes, run replacements against the full string,
+   * and redistribute the result when something changed. This catches PII split
+   * across adjacent runs (e.g. "SEAD" + " MEDITERRANEE" in different <w:r>).
+   *
+   * Redistribution puts the whole replaced string into the first <w:t> and
+   * clears the rest. In paragraphs that contained PII, per-run formatting
+   * (bold/italic spans inside the matched text) is collapsed — an acceptable
+   * trade-off to actually anonymize the content.
+   */
+  private applyReplacementsAcrossRuns(obj: any, replacements: PiiReplacement[]): void {
+    if (!obj || typeof obj !== 'object') return;
+
+    if ('w:p' in obj) {
+      const paragraph = obj['w:p'];
+      const paragraphs = Array.isArray(paragraph) ? paragraph : [paragraph];
+      for (const p of paragraphs) {
+        this.processParagraphForCrossRun(p, replacements);
+      }
+    }
+
+    if (Array.isArray(obj)) {
+      for (const item of obj) this.applyReplacementsAcrossRuns(item, replacements);
+    } else {
+      for (const key of Object.keys(obj)) {
+        if (key === 'w:p') continue; // already handled above
+        this.applyReplacementsAcrossRuns(obj[key], replacements);
+      }
+    }
+  }
+
+  private processParagraphForCrossRun(pNode: any, replacements: PiiReplacement[]): void {
+    if (!pNode || typeof pNode !== 'object') return;
+
+    type TextRef = { get: () => string; set: (s: string) => void };
+    const refs: TextRef[] = [];
+
+    const collect = (n: any): void => {
+      if (!n || typeof n !== 'object') return;
+      if ('w:t' in n) {
+        const tc = n['w:t'];
+        if (Array.isArray(tc)) {
+          tc.forEach((item, idx) => {
+            if (typeof item === 'string') {
+              refs.push({
+                get: () => n['w:t'][idx],
+                set: (s: string) => {
+                  n['w:t'][idx] = s;
+                },
+              });
+            } else if (item && typeof item === 'object' && '_' in item) {
+              refs.push({
+                get: () => item._,
+                set: (s: string) => {
+                  item._ = s;
+                },
+              });
+            }
+          });
+        } else if (typeof tc === 'string') {
+          refs.push({
+            get: () => n['w:t'],
+            set: (s: string) => {
+              n['w:t'] = s;
+            },
+          });
+        } else if (tc && typeof tc === 'object' && '_' in tc) {
+          refs.push({
+            get: () => tc._,
+            set: (s: string) => {
+              tc._ = s;
+            },
+          });
+        }
+      }
+      if (Array.isArray(n)) {
+        for (const child of n) collect(child);
+      } else {
+        for (const key of Object.keys(n)) collect(n[key]);
+      }
+    };
+    collect(pNode);
+
+    if (refs.length < 2) return; // single-node paragraphs were handled by pass 1
+
+    const original = refs.map((r) => r.get()).join('');
+    const replaced = this.replaceAllOccurrences(original, replacements);
+    if (replaced === original) return;
+
+    refs[0].set(replaced);
+    for (let i = 1; i < refs.length; i++) refs[i].set('');
+  }
+
+  /**
    * Replace all occurrences of PII in a text string
    */
   private replaceAllOccurrences(text: string, replacements: PiiReplacement[]): string {
@@ -318,6 +418,7 @@ export class DocxFormatterService {
     }
     const parsedXml = await parseXml(documentXml);
     this.applyReplacementsToXml(parsedXml, replacements);
+    this.applyReplacementsAcrossRuns(parsedXml, replacements);
     const builder = new Builder();
     const newDocumentXml = builder.buildObject(parsedXml);
     zip.file('word/document.xml', newDocumentXml);
@@ -365,6 +466,54 @@ export class DocxFormatterService {
       doc.on('error', reject);
       doc.pipe(stream);
       doc.font('Helvetica').fontSize(11).text(content, { align: 'left' });
+      doc.end();
+    });
+  }
+
+  /**
+   * Rebuild a PDF from a structured (positioned) text extraction after applying
+   * PII replacements to each text item in place. Pagination, positions, and
+   * font sizes are preserved; fonts are substituted with Helvetica since the
+   * original embedded font metadata is not available through the extractor.
+   *
+   * This is the layout-preserving replacement for writePdfFile() when the
+   * source is a PDF.
+   */
+  writePdfFromStructured(
+    structure: PdfStructure,
+    replacements: PiiReplacement[],
+    prefix = 'anonymized'
+  ): Promise<{ filePath: string; filename: string }> {
+    const filename = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
+    const filePath = path.join(this.downloadsDir, filename);
+
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ autoFirstPage: false });
+      const stream = fs.createWriteStream(filePath);
+      stream.on('finish', () => resolve({ filePath, filename }));
+      stream.on('error', reject);
+      doc.on('error', reject);
+      doc.pipe(stream);
+
+      for (const page of structure.pages) {
+        doc.addPage({ size: [page.width, page.height], margin: 0 });
+        doc.font('Helvetica');
+
+        for (const item of page.items) {
+          const text = this.replaceAllOccurrences(item.text, replacements);
+          if (!text) continue;
+          const fontSize = Math.max(1, item.fontSize);
+          // pdfjs: origin bottom-left, y is the text baseline.
+          // pdfkit: origin top-left; with baseline: 'alphabetic' the y arg is
+          // the baseline too, so we just flip Y against page height.
+          const pdfkitY = page.height - item.y;
+          doc.fontSize(fontSize).text(text, item.x, pdfkitY, {
+            lineBreak: false,
+            baseline: 'alphabetic',
+          });
+        }
+      }
+
       doc.end();
     });
   }
