@@ -44,8 +44,8 @@ export const config = {
       | 'ollama',
   },
   chunking: {
-    chunkSize: parseInt(process.env.CHUNK_SIZE || '1500', 10),
-    chunkOverlap: parseInt(process.env.CHUNK_OVERLAP || '200', 10),
+    chunkSize: parseInt(process.env.CHUNK_SIZE || '8000', 10),
+    chunkOverlap: parseInt(process.env.CHUNK_OVERLAP || '400', 10),
     enableParallel: process.env.ENABLE_PARALLEL_CHUNKS === 'true',
   },
 } as const;

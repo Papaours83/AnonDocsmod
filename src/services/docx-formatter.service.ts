@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import JSZip from 'jszip';
 import PDFDocument from 'pdfkit';
+import { PDFDocument as PDFLibDocument, StandardFonts, rgb } from 'pdf-lib';
 import { parseString, Builder } from 'xml2js';
 import { promisify } from 'util';
 import { PiiReplacement } from './llm.service';
@@ -25,7 +26,10 @@ export class DocxFormatterService {
 
   /**
    * Anonymize a DOCX file using precise PII replacements
-   * Preserves ALL formatting by replacing text directly in XML nodes
+   * Preserves ALL formatting by replacing text directly in XML nodes.
+   * Processes every word/*.xml part (main document, headers, footers,
+   * footnotes, endnotes, comments, glossary) so PII in text boxes and
+   * running heads/feet is also anonymized.
    */
   async anonymizeDocx(
     inputPath: string,
@@ -34,47 +38,68 @@ export class DocxFormatterService {
     try {
       console.log('[DOCX] Starting anonymization with', replacements.length, 'replacements');
 
-      // Read the original DOCX
       const data = fs.readFileSync(inputPath);
       const zip = await JSZip.loadAsync(data);
 
-      // Extract document.xml
-      const documentXml = await zip.file('word/document.xml')?.async('string');
-      if (!documentXml) {
-        throw new Error('Invalid DOCX file: word/document.xml not found');
+      const xmlParts = this.listDocxTextXmlParts(zip);
+      if (xmlParts.length === 0) {
+        throw new Error('Invalid DOCX file: no word/*.xml parts with text content');
       }
 
-      // Parse XML
-      const parsedXml = await parseXml(documentXml);
+      for (const part of xmlParts) {
+        await this.transformDocxXmlPart(zip, part, replacements);
+      }
 
-      // Apply replacements directly to text nodes
-      this.applyReplacementsToXml(parsedXml, replacements);
-
-      // Second pass: catch PII split across multiple <w:t> siblings within a
-      // paragraph (common when formatting changes mid-word, e.g. a bolded
-      // surname). Only affected paragraphs are rewritten.
-      this.applyReplacementsAcrossRuns(parsedXml, replacements);
-
-      // Convert back to XML
-      const builder = new Builder();
-      const newDocumentXml = builder.buildObject(parsedXml);
-
-      // Update the zip
-      zip.file('word/document.xml', newDocumentXml);
-
-      // Generate output file
       const filename = `anonymized-${Date.now()}-${Math.round(Math.random() * 1e9)}.docx`;
       const outputPath = path.join(this.downloadsDir, filename);
-
-      // Write the new DOCX
       const buffer = await zip.generateAsync({ type: 'nodebuffer' });
       fs.writeFileSync(outputPath, buffer);
 
-      console.log('[DOCX] Anonymization complete:', filename);
+      console.log('[DOCX] Anonymization complete:', filename, '(parts:', xmlParts.length, ')');
       return { filePath: outputPath, filename };
     } catch (error) {
       console.error('[DOCX] Error anonymizing:', error);
       throw error;
+    }
+  }
+
+  /**
+   * List every XML part inside a DOCX ZIP that is likely to contain body text
+   * (<w:t>). Covers document, headers, footers, footnotes, endnotes, comments.
+   */
+  private listDocxTextXmlParts(zip: JSZip): string[] {
+    return Object.keys(zip.files).filter((name) => {
+      if (!name.endsWith('.xml')) return false;
+      if (!name.startsWith('word/')) return false;
+      if (name.startsWith('word/_rels/')) return false;
+      if (name.startsWith('word/theme/')) return false;
+      if (name === 'word/settings.xml') return false;
+      if (name === 'word/styles.xml') return false;
+      if (name === 'word/fontTable.xml') return false;
+      if (name === 'word/webSettings.xml') return false;
+      if (name === 'word/numbering.xml') return false;
+      return true;
+    });
+  }
+
+  private async transformDocxXmlPart(
+    zip: JSZip,
+    partName: string,
+    replacements: PiiReplacement[]
+  ): Promise<void> {
+    const xml = await zip.file(partName)?.async('string');
+    if (!xml) return;
+    if (!xml.includes('<w:t')) return;
+
+    try {
+      const parsed = await parseXml(xml);
+      this.applyReplacementsToXml(parsed, replacements);
+      this.applyReplacementsAcrossRuns(parsed, replacements);
+      const builder = new Builder();
+      const newXml = builder.buildObject(parsed);
+      zip.file(partName, newXml);
+    } catch (err) {
+      console.warn(`[DOCX] Skipped ${partName} (parse error):`, err);
     }
   }
 
@@ -339,36 +364,42 @@ export class DocxFormatterService {
   }
 
   /**
-   * Extract plain text from DOCX (for anonymization)
+   * Extract plain text from DOCX (for anonymization). Walks every word/*.xml
+   * part so headers, footers, and text boxes are sent to the LLM too.
    */
   async extractText(docxPath: string): Promise<string> {
     try {
-      console.log('[DOCX] Extracting text from:', docxPath);
       const data = fs.readFileSync(docxPath);
-      console.log('[DOCX] File size:', data.length, 'bytes');
-
       const zip = await JSZip.loadAsync(data);
-      console.log('[DOCX] ZIP loaded, files:', Object.keys(zip.files).slice(0, 10));
 
-      const documentXml = await zip.file('word/document.xml')?.async('string');
-
-      if (!documentXml) {
-        console.error('[DOCX] word/document.xml not found in ZIP');
-        throw new Error('Invalid DOCX file: word/document.xml not found');
+      const parts = this.listDocxTextXmlParts(zip);
+      if (parts.length === 0) {
+        throw new Error('Invalid DOCX file: no word/*.xml parts found');
       }
 
-      console.log('[DOCX] document.xml length:', documentXml.length);
+      // Keep document.xml first for readable context, then append other parts
+      parts.sort((a, b) => {
+        if (a === 'word/document.xml') return -1;
+        if (b === 'word/document.xml') return 1;
+        return a.localeCompare(b);
+      });
 
-      const parsedXml = await parseXml(documentXml);
-      console.log('[DOCX] XML parsed successfully');
+      const pieces: string[] = [];
+      for (const partName of parts) {
+        const xml = await zip.file(partName)?.async('string');
+        if (!xml || !xml.includes('<w:t')) continue;
+        try {
+          const parsed = await parseXml(xml);
+          const textNodes = this.extractTextNodes(parsed);
+          const joined = textNodes.map((n) => n.text).join('');
+          if (joined.trim()) pieces.push(joined);
+        } catch (err) {
+          console.warn(`[DOCX] Skipped ${partName} (parse error):`, err);
+        }
+      }
 
-      const textNodes = this.extractTextNodes(parsedXml);
-      console.log('[DOCX] Text nodes found:', textNodes.length);
-
-      const text = textNodes.map((node) => node.text).join('');
-      console.log('[DOCX] Extracted text length:', text.length);
-      console.log('[DOCX] First 100 chars:', text.substring(0, 100));
-
+      const text = pieces.join('\n\n');
+      console.log('[DOCX] Extracted text length:', text.length, 'from', pieces.length, 'parts');
       return text;
     } catch (error) {
       console.error('[DOCX] Error extracting text:', error);
@@ -404,7 +435,8 @@ export class DocxFormatterService {
   }
 
   /**
-   * De-anonymize a DOCX: replace placeholders with original values using a PII report
+   * De-anonymize a DOCX: replace placeholders with original values using a
+   * PII report. Processes every word/*.xml part.
    */
   async deanonymizeDocx(
     inputPath: string,
@@ -412,16 +444,15 @@ export class DocxFormatterService {
   ): Promise<{ filePath: string; filename: string }> {
     const data = fs.readFileSync(inputPath);
     const zip = await JSZip.loadAsync(data);
-    const documentXml = await zip.file('word/document.xml')?.async('string');
-    if (!documentXml) {
-      throw new Error('Invalid DOCX file: word/document.xml not found');
+
+    const parts = this.listDocxTextXmlParts(zip);
+    if (parts.length === 0) {
+      throw new Error('Invalid DOCX file: no word/*.xml parts found');
     }
-    const parsedXml = await parseXml(documentXml);
-    this.applyReplacementsToXml(parsedXml, replacements);
-    this.applyReplacementsAcrossRuns(parsedXml, replacements);
-    const builder = new Builder();
-    const newDocumentXml = builder.buildObject(parsedXml);
-    zip.file('word/document.xml', newDocumentXml);
+    for (const partName of parts) {
+      await this.transformDocxXmlPart(zip, partName, replacements);
+    }
+
     const filename = `deanonymized-${Date.now()}-${Math.round(Math.random() * 1e9)}.docx`;
     const outputPath = path.join(this.downloadsDir, filename);
     const buffer = await zip.generateAsync({ type: 'nodebuffer' });
@@ -471,51 +502,105 @@ export class DocxFormatterService {
   }
 
   /**
-   * Rebuild a PDF from a structured (positioned) text extraction after applying
-   * PII replacements to each text item in place. Pagination, positions, and
-   * font sizes are preserved; fonts are substituted with Helvetica since the
-   * original embedded font metadata is not available through the extractor.
+   * Modify the original PDF in place: for every extracted text item whose
+   * content changes after applying replacements, paint a white rectangle over
+   * the original glyphs and draw the new text at the same position. Images,
+   * vector graphics, and non-PII text keep their original rendering.
    *
-   * This is the layout-preserving replacement for writePdfFile() when the
-   * source is a PDF.
+   * Text is drawn in Helvetica — the original embedded fonts are not reusable
+   * for arbitrary new strings (they usually subset to only the glyphs actually
+   * used in the file).
    */
-  writePdfFromStructured(
+  async anonymizePdfInPlace(
+    originalPdfPath: string,
     structure: PdfStructure,
     replacements: PiiReplacement[],
     prefix = 'anonymized'
   ): Promise<{ filePath: string; filename: string }> {
-    const filename = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
-    const filePath = path.join(this.downloadsDir, filename);
+    const pdfBytes = fs.readFileSync(originalPdfPath);
+    const pdfDoc = await PDFLibDocument.load(pdfBytes, { ignoreEncryption: true });
+    const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ autoFirstPage: false });
-      const stream = fs.createWriteStream(filePath);
-      stream.on('finish', () => resolve({ filePath, filename }));
-      stream.on('error', reject);
-      doc.on('error', reject);
-      doc.pipe(stream);
+    const pages = pdfDoc.getPages();
+    const pageCount = Math.min(pages.length, structure.pages.length);
 
-      for (const page of structure.pages) {
-        doc.addPage({ size: [page.width, page.height], margin: 0 });
-        doc.font('Helvetica');
+    for (let i = 0; i < pageCount; i++) {
+      const page = pages[i];
+      const structPage = structure.pages[i];
 
-        for (const item of page.items) {
-          const text = this.replaceAllOccurrences(item.text, replacements);
-          if (!text) continue;
-          const fontSize = Math.max(1, item.fontSize);
-          // pdfjs: origin bottom-left, y is the text baseline.
-          // pdfkit: origin top-left; with baseline: 'alphabetic' the y arg is
-          // the baseline too, so we just flip Y against page height.
-          const pdfkitY = page.height - item.y;
-          doc.fontSize(fontSize).text(text, item.x, pdfkitY, {
-            lineBreak: false,
-            baseline: 'alphabetic',
+      for (const item of structPage.items) {
+        const newText = this.replaceAllOccurrences(item.text, replacements);
+        if (newText === item.text) continue;
+
+        const fontSize = Math.max(1, item.fontSize);
+        const safeText = this.sanitizeForWinAnsi(newText);
+
+        let newWidth = 0;
+        try {
+          newWidth = helvetica.widthOfTextAtSize(safeText, fontSize);
+        } catch {
+          newWidth = item.width;
+        }
+        const coverWidth = Math.max(item.width, newWidth) + 2;
+
+        // Cover the original glyphs. item.y is the baseline; descender reaches
+        // ~0.25 * fontSize below, ascender ~0.8 above.
+        page.drawRectangle({
+          x: item.x - 1,
+          y: item.y - fontSize * 0.25,
+          width: coverWidth,
+          height: fontSize * 1.15,
+          color: rgb(1, 1, 1),
+          borderWidth: 0,
+        });
+
+        try {
+          page.drawText(safeText, {
+            x: item.x,
+            y: item.y,
+            size: fontSize,
+            font: helvetica,
+            color: rgb(0, 0, 0),
           });
+        } catch (err) {
+          // If Helvetica can't encode a character, fall back to ASCII-only
+          const ascii = safeText.replace(/[^\x20-\x7E]/g, '?');
+          try {
+            page.drawText(ascii, {
+              x: item.x,
+              y: item.y,
+              size: fontSize,
+              font: helvetica,
+              color: rgb(0, 0, 0),
+            });
+          } catch {
+            // Last resort: leave the white box, drop the text entirely
+          }
         }
       }
+    }
 
-      doc.end();
-    });
+    const outBytes = await pdfDoc.save();
+    const filename = `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`;
+    const filePath = path.join(this.downloadsDir, filename);
+    fs.writeFileSync(filePath, outBytes);
+    return { filePath, filename };
+  }
+
+  /**
+   * Strip code points that Helvetica's WinAnsi encoding cannot represent.
+   * Preserves Latin-1 (covers French accents, common punctuation).
+   */
+  private sanitizeForWinAnsi(text: string): string {
+    return text
+      .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+      .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+      .replace(/[\u2013\u2014\u2015]/g, '-')
+      .replace(/\u2026/g, '...')
+      .replace(/\u00A0/g, ' ')
+      .replace(/\u202F/g, ' ')
+      .replace(/[\u2192\u2794\u27A1]/g, '->')
+      .replace(/[\u2190]/g, '<-');
   }
 
   /**

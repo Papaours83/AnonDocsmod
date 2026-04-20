@@ -181,8 +181,18 @@ export class AnonymizationService {
         anonymizedChunks.push(chunkText);
       }
 
+      // Safety net: the LLM sometimes misses structured PII, especially when
+      // a piece appears in only one chunk and the surrounding context is thin.
+      // Scan the original text for well-defined patterns (phone, email, URL,
+      // SIRET, French street addresses) and add any match that isn't already
+      // covered. These run AFTER the LLM so they don't disturb its output.
+      this.augmentWithDeterministicPatterns(text, allReplacements, counters);
+
       // Combine anonymized chunks
-      const anonymizedText = anonymizedChunks.join('\n\n');
+      let anonymizedText = anonymizedChunks.join('\n\n');
+      // Apply any newly-discovered deterministic replacements to the returned
+      // anonymizedText too so callers that display it see a consistent view.
+      anonymizedText = this.applyReplacements(anonymizedText, allReplacements);
 
       // Calculate metrics
       const endTime = Date.now();
@@ -223,6 +233,87 @@ export class AnonymizationService {
 
       throw error;
     }
+  }
+
+  /**
+   * Append deterministic replacements for PII patterns the LLM may have
+   * missed. Mutates `replacements` and `counters` in place. Only adds a match
+   * if it isn't already an original in the existing replacements list and
+   * isn't contained within an existing original (to avoid double-covering
+   * parts of a longer address or signature block).
+   */
+  private augmentWithDeterministicPatterns(
+    text: string,
+    replacements: PiiReplacement[],
+    counters: Record<string, number>
+  ): void {
+    const existing = replacements.map((r) => r.original);
+    const isCovered = (candidate: string): boolean => {
+      const c = candidate.toLowerCase();
+      for (const orig of existing) {
+        const o = orig.toLowerCase();
+        if (o === c || o.includes(c) || c.includes(o)) return true;
+      }
+      return false;
+    };
+
+    const patterns: Array<{ regex: RegExp; category: string }> = [
+      // Emails
+      { regex: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, category: 'Email' },
+      // URLs (http/https/www)
+      { regex: /\b(?:https?:\/\/|www\.)[^\s<>"')]+/gi, category: 'Other' },
+      // French phone numbers: 0X XX XX XX XX (spaces/dots/dashes optional),
+      // and international +33 X XX XX XX XX
+      {
+        regex: /(?:(?:\+33|0033)[\s.-]?|\b0)[1-9](?:[\s.-]?\d{2}){4}\b/g,
+        category: 'Phone',
+      },
+      // SIRET (14 digits, with optional spacing every 3)
+      { regex: /\b\d{3}[\s.]?\d{3}[\s.]?\d{3}[\s.]?\d{5}\b/g, category: 'Id' },
+      // French street addresses, e.g. "3 route de Montfavet", "292 Avenue du Prado"
+      {
+        regex:
+          /\b\d{1,4}(?:\s*(?:bis|ter|quater))?[,\s]+(?:rue|route|avenue|av\.?|boulevard|bd\.?|chemin|impasse|place|allée|allee|voie|passage|quai|cours)\s+(?:(?:de|du|des|de\s+la|de\s+l'|la|le|les|d')\s+)?[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][\wÀ-ÿ'\-\s]{1,60}/gi,
+        category: 'Address',
+      },
+      // French postal code + city, e.g. "13008 MARSEILLE", "84000 AVIGNON"
+      {
+        regex: /\b\d{5}\s+[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ\s\-']{2,}\b/g,
+        category: 'Address',
+      },
+    ];
+
+    for (const { regex, category } of patterns) {
+      const found = new Set<string>();
+      let m: RegExpExecArray | null;
+      regex.lastIndex = 0;
+      while ((m = regex.exec(text)) !== null) {
+        const match = m[0].trim().replace(/[.,;:!?]+$/, '');
+        if (match.length < 4) continue;
+        found.add(match);
+      }
+      for (const match of found) {
+        if (isCovered(match)) continue;
+        counters[category] = (counters[category] || 0) + 1;
+        const placeholder = `[${category}${counters[category]}]`;
+        replacements.push({ original: match, anonymized: placeholder });
+        existing.push(match);
+      }
+    }
+  }
+
+  /**
+   * Apply a replacement table to a string. Longest originals first so that a
+   * shorter one never clobbers part of a longer match.
+   */
+  private applyReplacements(text: string, replacements: PiiReplacement[]): string {
+    const sorted = [...replacements].sort((a, b) => b.original.length - a.original.length);
+    let out = text;
+    for (const rep of sorted) {
+      const escaped = rep.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(escaped, 'g'), rep.anonymized);
+    }
+    return out;
   }
 }
 

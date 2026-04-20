@@ -125,43 +125,49 @@ export class DocumentController {
   private async handlePdf(req: Request, res: Response, provider: LLMProvider): Promise<void> {
     if (!req.file) return;
 
-    const structure = await parserService.parsePdfStructured(req.file.path);
-    const flatText = parserService.flattenPdfStructure(structure);
+    const originalPath = req.file.path;
+    try {
+      const structure = await parserService.parsePdfStructured(originalPath);
+      const flatText = parserService.flattenPdfStructure(structure);
 
-    fs.unlinkSync(req.file.path);
+      if (!flatText || flatText.trim().length === 0) {
+        res.status(400).json({ error: 'Could not extract text from PDF' });
+        return;
+      }
 
-    if (!flatText || flatText.trim().length === 0) {
-      res.status(400).json({ error: 'Could not extract text from PDF' });
-      return;
+      const result = await anonymizationService.anonymizeText(flatText, provider);
+
+      const piiReport = docxFormatterService.writePiiReport(
+        result.piiDetected as any,
+        result.replacements
+      );
+
+      // Overlay replacements onto the original PDF — preserves images,
+      // vector graphics, pagination, and all non-PII text as-is.
+      const anonOut = await docxFormatterService.anonymizePdfInPlace(
+        originalPath,
+        structure,
+        result.replacements,
+        'anonymized'
+      );
+
+      const baseName = req.file.originalname.replace(/\.pdf$/i, '');
+      const zip = new JSZip();
+      zip.file(`anonymized-${baseName}.pdf`, fs.readFileSync(anonOut.filePath));
+      zip.file(
+        `pii-${baseName}.txt`,
+        fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
+      );
+      const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
+      res.setHeader('X-Anonymized-Filename', anonOut.filename);
+      res.setHeader('X-Pii-Filename', piiReport.filename);
+      res.send(zipBuffer);
+    } finally {
+      if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
     }
-
-    const result = await anonymizationService.anonymizeText(flatText, provider);
-
-    const piiReport = docxFormatterService.writePiiReport(
-      result.piiDetected as any,
-      result.replacements
-    );
-
-    const anonOut = await docxFormatterService.writePdfFromStructured(
-      structure,
-      result.replacements,
-      'anonymized'
-    );
-
-    const baseName = req.file.originalname.replace(/\.pdf$/i, '');
-    const zip = new JSZip();
-    zip.file(`anonymized-${baseName}.pdf`, fs.readFileSync(anonOut.filePath));
-    zip.file(
-      `pii-${baseName}.txt`,
-      fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
-    );
-    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
-
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
-    res.setHeader('X-Anonymized-Filename', anonOut.filename);
-    res.setHeader('X-Pii-Filename', piiReport.filename);
-    res.send(zipBuffer);
   }
 
   /**
@@ -268,7 +274,8 @@ export class DocumentController {
           res.status(400).json({ error: 'Could not extract text from PDF' });
           return;
         }
-        const { filePath, filename } = await docxFormatterService.writePdfFromStructured(
+        const { filePath, filename } = await docxFormatterService.anonymizePdfInPlace(
+          docFile.path,
           structure,
           replacements,
           'deanonymized'
