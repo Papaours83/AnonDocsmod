@@ -21,7 +21,6 @@ export interface AnonymizationResult {
     phoneNumbers: string[];
     dates: string[];
     organizations: string[];
-    other: string[];
   };
   replacements: PiiReplacement[];
 }
@@ -33,8 +32,7 @@ export type PiiCategory =
   | 'Email'
   | 'Phone'
   | 'Date'
-  | 'Id'
-  | 'Other';
+  | 'Id';
 
 export interface RemainingPii {
   original: string;
@@ -164,14 +162,15 @@ Respond with a JSON object in this exact format:
     "emails": ["list of detected emails"],
     "phoneNumbers": ["list of detected phone numbers"],
     "dates": ["list of detected dates"],
-    "organizations": ["list of detected organizations"],
-    "other": ["any other PII detected"]
+    "organizations": ["list of detected organizations"]
   },
   "replacements": [
-    {"original": "exact original text", "anonymized": "[PLACEHOLDER]"},
-    {"original": "another original", "anonymized": "[OTHER]"}
+    {"original": "exact original text", "anonymized": "[Name]"},
+    {"original": "another original", "anonymized": "[Organization]"}
   ]
-}`;
+}
+
+Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email], [Phone], [Date], [Id]. Do NOT invent categories like [Other], [Project], [Code], etc. — classify every finding into one of those seven.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -276,7 +275,7 @@ Respond with a JSON object in this exact format:
     const systemPrompt = `/no_think
 You are a PII auditor. The text you will see has ALREADY been partially anonymized:
 tokens in square brackets like [Name1], [Organization2], [Address3], [Phone4],
-[Email5], [Date6], [Id7], [Other8] are EXISTING placeholders — you MUST ignore
+[Email5], [Date6], [Id7] are EXISTING placeholders — you MUST ignore
 them and never include them in your output.
 
 Your task: scan the text and list EVERY remaining piece of PII that is still in
@@ -306,7 +305,8 @@ Respond with ONLY a JSON object, no prose, no markdown fences:
   ]
 }
 
-Allowed categories: Name, Organization, Address, Email, Phone, Date, Id, Other.`;
+Allowed categories (use EXACTLY one of these — no others): Name, Organization, Address, Email, Phone, Date, Id.
+For anything that doesn't clearly fit Name/Address/Email/Phone/Date/Id, use Organization.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -333,7 +333,6 @@ Allowed categories: Name, Organization, Address, Email, Phone, Date, Id, Other.`
         'Phone',
         'Date',
         'Id',
-        'Other',
       ]);
 
       return parsed.remainingPii

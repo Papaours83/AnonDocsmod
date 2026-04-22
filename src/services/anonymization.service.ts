@@ -68,7 +68,6 @@ export class AnonymizationService {
         phoneNumbers: [],
         dates: [],
         organizations: [],
-        other: [],
       };
 
       let results: AnonymizationResult[];
@@ -123,9 +122,12 @@ export class AnonymizationService {
       const globalMap = new Map<string, string>();
       const counters: Record<string, number> = {};
 
+      // Normalize the LLM's placeholder into one of the seven allowed
+      // categories. Anything we can't confidently classify falls back to
+      // Organization — acts as a catch-all for unidentified proper nouns.
       const categoryFromPlaceholder = (ph: string): string => {
         const m = ph.match(/\[([A-Za-z_ ]+?)\d*\]/);
-        if (!m) return 'Other';
+        if (!m) return 'Organization';
         const raw = m[1].trim().toLowerCase().replace(/[_\s]/g, '');
         const mapping: Record<string, string> = {
           name: 'Name',
@@ -144,12 +146,8 @@ export class AnonymizationService {
           organizations: 'Organization',
           org: 'Organization',
           id: 'Id',
-          other: 'Other',
         };
-        return (
-          mapping[raw] ||
-          m[1].trim().charAt(0).toUpperCase() + m[1].trim().slice(1).toLowerCase()
-        );
+        return mapping[raw] || 'Organization';
       };
 
       for (const result of results) {
@@ -164,7 +162,6 @@ export class AnonymizationService {
         if (result.piiDetected.dates) allPiiDetected.dates.push(...result.piiDetected.dates);
         if (result.piiDetected.organizations)
           allPiiDetected.organizations.push(...result.piiDetected.organizations);
-        if (result.piiDetected.other) allPiiDetected.other.push(...result.piiDetected.other);
 
         const chunkReplacements = result.replacements || [];
         for (const rep of chunkReplacements) {
@@ -201,28 +198,34 @@ export class AnonymizationService {
       anonymizedText = this.applyReplacements(anonymizedText, allReplacements);
 
       // Second LLM pass: ask the model to audit the already-anonymized text
-      // and surface any PII still in clear form. Acronyms, short company codes,
-      // brand names and multi-word names containing common nouns are the
-      // usual misses from pass 1.
+      // and surface any PII still in clear form. Loop up to maxIterations so
+      // entities the model spots in iteration N (but fails to classify for
+      // the whole doc) get cleaned up in iteration N+1. Break as soon as an
+      // iteration finds nothing new.
       if (config.anonymization.enableSecondPass) {
-        if (progressEmitter) {
-          progressEmitter.emit('progress', {
-            type: 'chunk_processing',
-            progress: 92,
-            message: 'Running second-pass PII audit',
-          } as ProgressEvent);
-        }
-        const added = await this.runSecondPassAudit(
-          anonymizedText,
-          allReplacements,
-          allPiiDetected,
-          globalMap,
-          counters,
-          provider
-        );
-        if (added > 0) {
+        const maxIterations = 3;
+        for (let iter = 1; iter <= maxIterations; iter++) {
+          if (progressEmitter) {
+            progressEmitter.emit('progress', {
+              type: 'chunk_processing',
+              progress: 90 + iter * 2,
+              message: `Running second-pass PII audit (iteration ${iter}/${maxIterations})`,
+            } as ProgressEvent);
+          }
+          const added = await this.runSecondPassAudit(
+            anonymizedText,
+            allReplacements,
+            allPiiDetected,
+            globalMap,
+            counters,
+            provider
+          );
+          if (added === 0) {
+            if (iter > 1) console.log(`[Anonymize] Second pass converged after ${iter - 1} iteration(s)`);
+            break;
+          }
           anonymizedText = this.applyReplacements(anonymizedText, allReplacements);
-          console.log(`[Anonymize] Second pass added ${added} replacement(s)`);
+          console.log(`[Anonymize] Second pass iteration ${iter} added ${added} replacement(s)`);
         }
       }
 
@@ -289,11 +292,49 @@ export class AnonymizationService {
       return false;
     };
 
-    const patterns: Array<{ regex: RegExp; category: string }> = [
+    // Construction/technical role abbreviations that are NOT companies or
+    // people. Used to filter out false positives from the fuzzy UPPERCASE
+    // patterns below ("MOE MOA", "CSPS SPS", …).
+    const ROLE_STOPLIST = new Set<string>([
+      // Project roles
+      'MOE', 'MOA', 'AMOA', 'AMOE', 'AMO', 'MOP', 'OPC', 'OPR', 'AOR',
+      'SPS', 'CSPS', 'BET', 'BTP', 'TCE', 'GO',
+      // Project phases / documents
+      'APS', 'APD', 'PRO', 'EXE', 'DCE', 'DOE', 'DIUO', 'PPSPS', 'PGC',
+      'CCTP', 'CCAG', 'CCAP', 'BPU', 'DPGF', 'DQE', 'AVP', 'RICT',
+      // Technical systems / regs
+      'VRD', 'VMC', 'CVC', 'CFO', 'CFA', 'SSI', 'CTA', 'PAC', 'ERP', 'IGH',
+      'ICPE', 'ABF', 'RT', 'RE', 'NF', 'CE', 'ISO', 'DTU', 'OS', 'OA',
+      'ATE', 'ATEC', 'ATEX',
+      // Business / admin
+      'HT', 'TTC', 'TVA', 'PME', 'PMI', 'PDG', 'RH', 'DRH', 'PC', 'PV',
+      // Tech/web (tend to appear in meta, not as entities)
+      'URL', 'HTTP', 'HTTPS', 'PDF', 'XML', 'JSON', 'CSV', 'TXT', 'HTML',
+      'CSS', 'SQL', 'API', 'SDK', 'RGPD', 'GDPR', 'IP', 'GPS',
+    ]);
+
+    // Titles / honorifics that should NOT be treated as first names
+    const TITLE_STOPLIST = new Set<string>([
+      'Monsieur', 'Madame', 'Mademoiselle', 'Mr', 'Mme', 'Mlle', 'Dr',
+      'Maître', 'Me', 'Prof', 'Professeur',
+    ]);
+
+    const isAllStoplisted = (s: string, stoplist: Set<string>): boolean => {
+      const tokens = s.split(/[\s-]+/).filter(Boolean);
+      if (tokens.length === 0) return false;
+      return tokens.every((t) => stoplist.has(t));
+    };
+
+    type Pattern = {
+      regex: RegExp;
+      category: string;
+      minLen?: number;
+      filter?: (match: string) => boolean;
+    };
+
+    const patterns: Pattern[] = [
       // Emails
       { regex: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, category: 'Email' },
-      // URLs (http/https/www)
-      { regex: /\b(?:https?:\/\/|www\.)[^\s<>"')]+/gi, category: 'Other' },
       // French phone numbers: 0X XX XX XX XX (spaces/dots/dashes optional),
       // and international +33 X XX XX XX XX
       {
@@ -313,15 +354,62 @@ export class AnonymizationService {
         regex: /\b\d{5}\s+[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ\s\-']{2,}\b/g,
         category: 'Address',
       },
+      // Person name — "Firstname LASTNAME" (e.g. "Michael HANN", "Vincent NICOLAS")
+      {
+        regex:
+          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)\s+([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)\b/g,
+        category: 'Name',
+        minLen: 7,
+        filter: (match) => {
+          const parts = match.split(/\s+/);
+          if (parts.length < 2) return false;
+          const [first, last] = parts;
+          if (TITLE_STOPLIST.has(first)) return false;
+          if (ROLE_STOPLIST.has(last)) return false;
+          return true;
+        },
+      },
+      // Person name — "LASTNAME Firstname" (common in French admin docs)
+      {
+        regex:
+          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)\s+([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)\b/g,
+        category: 'Name',
+        minLen: 7,
+        filter: (match) => {
+          const parts = match.split(/\s+/);
+          if (parts.length < 2) return false;
+          const [last, first] = parts;
+          if (ROLE_STOPLIST.has(last)) return false;
+          if (TITLE_STOPLIST.has(first)) return false;
+          return true;
+        },
+      },
+      // 2+ consecutive UPPERCASE words — company / multi-word acronym
+      // ("VAR TOITURES", "SR PLUS", "SOCOTEC MOE", "CSPS SOCOTEC")
+      {
+        regex:
+          /\b[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ0-9]+(?:\s+[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ0-9]+)+\b/g,
+        category: 'Organization',
+        minLen: 5,
+        filter: (match) => !isAllStoplisted(match, ROLE_STOPLIST),
+      },
+      // Alphanumeric UPPERCASE code ("AG83", "PAP83", "R12", "ZAC2024")
+      {
+        regex: /\b[A-Z]{2,}\d+\b/g,
+        category: 'Organization',
+        minLen: 3,
+        filter: (match) => !ROLE_STOPLIST.has(match.replace(/\d+$/, '')),
+      },
     ];
 
-    for (const { regex, category } of patterns) {
+    for (const { regex, category, minLen = 4, filter } of patterns) {
       const found = new Set<string>();
       let m: RegExpExecArray | null;
       regex.lastIndex = 0;
       while ((m = regex.exec(text)) !== null) {
         const match = m[0].trim().replace(/[.,;:!?]+$/, '');
-        if (match.length < 4) continue;
+        if (match.length < minLen) continue;
+        if (filter && !filter(match)) continue;
         found.add(match);
       }
       for (const match of found) {
@@ -367,15 +455,13 @@ export class AnonymizationService {
       return 0;
     }
 
-    const categoryToBucket: Record<string, keyof AnonymizationResult['piiDetected']> = {
+    const categoryToBucket: Partial<Record<string, keyof AnonymizationResult['piiDetected']>> = {
       Name: 'names',
       Organization: 'organizations',
       Address: 'addresses',
       Email: 'emails',
       Phone: 'phoneNumbers',
       Date: 'dates',
-      Other: 'other',
-      Id: 'other',
     };
 
     let added = 0;
@@ -400,8 +486,8 @@ export class AnonymizationService {
         existingOriginals.add(original);
         added++;
 
-        const bucket = categoryToBucket[category] || 'other';
-        piiDetected[bucket].push(original);
+        const bucket = categoryToBucket[category];
+        if (bucket) piiDetected[bucket].push(original);
       }
     }
 
