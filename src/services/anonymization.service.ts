@@ -402,6 +402,7 @@ export class AnonymizationService {
       },
     ];
 
+    const addedHere: PiiReplacement[] = [];
     for (const { regex, category, minLen = 4, filter } of patterns) {
       const found = new Set<string>();
       let m: RegExpExecArray | null;
@@ -416,9 +417,17 @@ export class AnonymizationService {
         if (isCovered(match)) continue;
         counters[category] = (counters[category] || 0) + 1;
         const placeholder = `[${category}${counters[category]}]`;
-        replacements.push({ original: match, anonymized: placeholder });
+        const rep = { original: match, anonymized: placeholder };
+        replacements.push(rep);
+        addedHere.push(rep);
         existing.push(match);
       }
+    }
+    if (addedHere.length > 0) {
+      console.log(`[Anonymize] Deterministic patterns caught ${addedHere.length}:`,
+        addedHere.map((r) => `${JSON.stringify(r.original)}->${r.anonymized}`).join(', '));
+    } else {
+      console.log('[Anonymize] Deterministic patterns caught 0');
     }
   }
 
