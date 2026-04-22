@@ -48,4 +48,9 @@ export const config = {
     chunkOverlap: parseInt(process.env.CHUNK_OVERLAP || '400', 10),
     enableParallel: process.env.ENABLE_PARALLEL_CHUNKS === 'true',
   },
+  anonymization: {
+    // Second LLM pass on the already-anonymized text to catch PII the first
+    // pass missed (acronyms, short company codes, etc.). Default: ON.
+    enableSecondPass: process.env.ENABLE_SECOND_PASS !== 'false',
+  },
 } as const;

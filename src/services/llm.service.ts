@@ -26,6 +26,21 @@ export interface AnonymizationResult {
   replacements: PiiReplacement[];
 }
 
+export type PiiCategory =
+  | 'Name'
+  | 'Organization'
+  | 'Address'
+  | 'Email'
+  | 'Phone'
+  | 'Date'
+  | 'Id'
+  | 'Other';
+
+export interface RemainingPii {
+  original: string;
+  category: PiiCategory;
+}
+
 export class LLMService {
   private models: Map<LLMProvider, BaseChatModel> = new Map();
 
@@ -238,6 +253,105 @@ Respond with a JSON object in this exact format:
 
   getAvailableProviders(): LLMProvider[] {
     return Array.from(this.models.keys());
+  }
+
+  /**
+   * Second pass: given text that has already been partially anonymized (with
+   * placeholders like [Name1], [Organization2]), ask the LLM to list PII that
+   * is still present in clear form. Existing placeholders must be ignored.
+   * Returns an array of {original, category} — callers assign placeholders.
+   */
+  async findRemainingPii(
+    anonymizedText: string,
+    provider?: LLMProvider
+  ): Promise<RemainingPii[]> {
+    const selectedProvider = provider || config.llm.defaultProvider;
+    const model = this.models.get(selectedProvider);
+    if (!model) {
+      throw new Error(
+        `LLM provider "${selectedProvider}" is not configured for second pass.`
+      );
+    }
+
+    const systemPrompt = `/no_think
+You are a PII auditor. The text you will see has ALREADY been partially anonymized:
+tokens in square brackets like [Name1], [Organization2], [Address3], [Phone4],
+[Email5], [Date6], [Id7], [Other8] are EXISTING placeholders — you MUST ignore
+them and never include them in your output.
+
+Your task: scan the text and list EVERY remaining piece of PII that is still in
+clear form (i.e. was missed by the first anonymization pass). Be AGGRESSIVE.
+
+Look especially for:
+- Personal names (first names, last names, full names, "Prénom NOM" patterns)
+- Organization names, companies, subcontractors, suppliers, clients, brand names,
+  product names, trade names
+- Short codes / acronyms / internal project or lot references that look like
+  identifiers (e.g. "AG83", "PAP", "SR PLUS", "VAR TOITURES", "Macrolot",
+  "Lot 6"). Any UPPERCASE token of 2+ letters that is not a common word is
+  likely PII.
+- Addresses, phone numbers, emails, identifying dates, ID numbers
+
+Rules:
+- Do NOT include any [Placeholder] token — they are already anonymized.
+- Each "original" must be the EXACT substring that appears in the input text.
+- One entry per distinct surface form (case-sensitive, including spacing).
+- If you find nothing, return an empty array.
+
+Respond with ONLY a JSON object, no prose, no markdown fences:
+{
+  "remainingPii": [
+    {"original": "exact string from the text", "category": "Name"},
+    {"original": "...", "category": "Organization"}
+  ]
+}
+
+Allowed categories: Name, Organization, Address, Email, Phone, Date, Id, Other.`;
+
+    const messages = [
+      new SystemMessage(systemPrompt),
+      new HumanMessage(`Audit the following partially-anonymized text:\n\n${anonymizedText}`),
+    ];
+
+    try {
+      const response = await model.invoke(messages);
+      let content = response.content.toString();
+      content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
+      content = content.replace(/<think>[\s\S]*$/i, '');
+
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return [];
+
+      const parsed = JSON.parse(jsonMatch[0]) as { remainingPii?: RemainingPii[] };
+      if (!parsed.remainingPii || !Array.isArray(parsed.remainingPii)) return [];
+
+      const allowed: ReadonlySet<PiiCategory> = new Set<PiiCategory>([
+        'Name',
+        'Organization',
+        'Address',
+        'Email',
+        'Phone',
+        'Date',
+        'Id',
+        'Other',
+      ]);
+
+      return parsed.remainingPii
+        .filter(
+          (p): p is RemainingPii =>
+            !!p &&
+            typeof p.original === 'string' &&
+            p.original.trim().length > 0 &&
+            // Reject anything that looks like an existing placeholder
+            !/^\[[A-Za-z_ ]+\d*\]$/.test(p.original.trim()) &&
+            typeof p.category === 'string' &&
+            allowed.has(p.category as PiiCategory)
+        )
+        .map((p) => ({ original: p.original, category: p.category }));
+    } catch (err) {
+      console.warn('[LLM] Second-pass PII audit failed:', err);
+      return [];
+    }
   }
 }
 

@@ -1,5 +1,11 @@
 import { chunkingService } from './chunking.service';
-import { llmService, LLMProvider, AnonymizationResult, PiiReplacement } from './llm.service';
+import {
+  llmService,
+  LLMProvider,
+  AnonymizationResult,
+  PiiReplacement,
+  RemainingPii,
+} from './llm.service';
 import { config } from '../config';
 import { EventEmitter } from 'events';
 
@@ -194,6 +200,32 @@ export class AnonymizationService {
       // anonymizedText too so callers that display it see a consistent view.
       anonymizedText = this.applyReplacements(anonymizedText, allReplacements);
 
+      // Second LLM pass: ask the model to audit the already-anonymized text
+      // and surface any PII still in clear form. Acronyms, short company codes,
+      // brand names and multi-word names containing common nouns are the
+      // usual misses from pass 1.
+      if (config.anonymization.enableSecondPass) {
+        if (progressEmitter) {
+          progressEmitter.emit('progress', {
+            type: 'chunk_processing',
+            progress: 92,
+            message: 'Running second-pass PII audit',
+          } as ProgressEvent);
+        }
+        const added = await this.runSecondPassAudit(
+          anonymizedText,
+          allReplacements,
+          allPiiDetected,
+          globalMap,
+          counters,
+          provider
+        );
+        if (added > 0) {
+          anonymizedText = this.applyReplacements(anonymizedText, allReplacements);
+          console.log(`[Anonymize] Second pass added ${added} replacement(s)`);
+        }
+      }
+
       // Calculate metrics
       const endTime = Date.now();
       const processingTimeMs = endTime - startTime;
@@ -300,6 +332,80 @@ export class AnonymizationService {
         existing.push(match);
       }
     }
+  }
+
+  /**
+   * Second-pass audit. Chunks the already-anonymized text, asks the LLM to
+   * surface any PII still in clear form, and merges the findings into the
+   * shared replacements list (using the same global counters/globalMap so
+   * placeholder numbering stays consistent with the first pass).
+   * Returns the number of new replacements added.
+   */
+  private async runSecondPassAudit(
+    anonymizedText: string,
+    replacements: PiiReplacement[],
+    piiDetected: AnonymizationResult['piiDetected'],
+    globalMap: Map<string, string>,
+    counters: Record<string, number>,
+    provider?: LLMProvider
+  ): Promise<number> {
+    const existingOriginals = new Set(replacements.map((r) => r.original));
+    const chunks = chunkingService.chunkText(anonymizedText);
+
+    let audits: RemainingPii[][];
+    try {
+      if (config.chunking.enableParallel) {
+        audits = await Promise.all(chunks.map((c) => llmService.findRemainingPii(c, provider)));
+      } else {
+        audits = [];
+        for (const c of chunks) {
+          audits.push(await llmService.findRemainingPii(c, provider));
+        }
+      }
+    } catch (err) {
+      console.warn('[Anonymize] Second pass failed, skipping:', err);
+      return 0;
+    }
+
+    const categoryToBucket: Record<string, keyof AnonymizationResult['piiDetected']> = {
+      Name: 'names',
+      Organization: 'organizations',
+      Address: 'addresses',
+      Email: 'emails',
+      Phone: 'phoneNumbers',
+      Date: 'dates',
+      Other: 'other',
+      Id: 'other',
+    };
+
+    let added = 0;
+    for (const auditList of audits) {
+      for (const item of auditList) {
+        const original = item.original;
+        // Must actually exist in the anonymized text (LLMs can hallucinate)
+        if (!anonymizedText.includes(original)) continue;
+        // Dedup by exact original — we keep case-sensitive form here since
+        // acronyms like "AG83" and "ag83" should be treated as distinct.
+        if (existingOriginals.has(original)) continue;
+
+        const category = item.category;
+        const key = `${category}|${original.trim().toLowerCase()}`;
+        let ph = globalMap.get(key);
+        if (!ph) {
+          counters[category] = (counters[category] || 0) + 1;
+          ph = `[${category}${counters[category]}]`;
+          globalMap.set(key, ph);
+        }
+        replacements.push({ original, anonymized: ph });
+        existingOriginals.add(original);
+        added++;
+
+        const bucket = categoryToBucket[category] || 'other';
+        piiDetected[bucket].push(original);
+      }
+    }
+
+    return added;
   }
 
   /**
