@@ -3,7 +3,7 @@ import path from 'path';
 import JSZip from 'jszip';
 import PDFDocument from 'pdfkit';
 import { PDFDocument as PDFLibDocument, StandardFonts, rgb } from 'pdf-lib';
-import { parseString, Builder } from 'xml2js';
+import { parseString } from 'xml2js';
 import { promisify } from 'util';
 import { PiiReplacement } from './llm.service';
 import { PdfStructure } from './parser.service';
@@ -92,15 +92,83 @@ export class DocxFormatterService {
     if (!xml.includes('<w:t')) return;
 
     try {
-      const parsed = await parseXml(xml);
-      this.applyReplacementsToXml(parsed, replacements);
-      this.applyReplacementsAcrossRuns(parsed, replacements);
-      const builder = new Builder();
-      const newXml = builder.buildObject(parsed);
-      zip.file(partName, newXml);
+      // String-based replacement only. Parsing + rebuilding with xml2js
+      // reorders siblings of different tag names (e.g. groups all <w:p>
+      // together then all <w:tbl>), which moves tables to the end of the body.
+      const newXml = this.replaceInDocxXml(xml, replacements);
+      if (newXml !== xml) zip.file(partName, newXml);
     } catch (err) {
-      console.warn(`[DOCX] Skipped ${partName} (parse error):`, err);
+      console.warn(`[DOCX] Skipped ${partName} (replace error):`, err);
     }
+  }
+
+  /**
+   * Apply PII replacements to a DOCX XML string without touching its
+   * structure. Two passes:
+   *   1. Replace inside each individual <w:t>…</w:t> run.
+   *   2. For each <w:p>…</w:p> with multiple <w:t> runs, concatenate the run
+   *      texts and re-run replacement so PII split across runs is still caught;
+   *      on match, the whole replaced string goes into the first run and the
+   *      others are emptied (same trade-off as the previous implementation).
+   */
+  private replaceInDocxXml(xml: string, replacements: PiiReplacement[]): string {
+    const tRegex = /(<w:t(?:\s[^>]*)?>)([\s\S]*?)(<\/w:t>)/g;
+
+    // Pass 1: per-run replacement
+    let out = xml.replace(tRegex, (_m, open: string, inner: string, close: string) => {
+      const decoded = this.xmlDecodeText(inner);
+      const replaced = this.replaceAllOccurrences(decoded, replacements);
+      if (replaced === decoded) return _m;
+      return `${this.ensureXmlSpacePreserve(open, replaced)}${this.xmlEncodeText(replaced)}${close}`;
+    });
+
+    // Pass 2: cross-run replacement within each <w:p>…</w:p>
+    const pRegex = /<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g;
+    out = out.replace(pRegex, (pBlock: string) => {
+      const tMatches = [...pBlock.matchAll(tRegex)];
+      if (tMatches.length < 2) return pBlock;
+
+      const texts = tMatches.map((m) => this.xmlDecodeText(m[2]));
+      const combined = texts.join('');
+      const replaced = this.replaceAllOccurrences(combined, replacements);
+      if (replaced === combined) return pBlock;
+
+      let idx = 0;
+      return pBlock.replace(tRegex, (_m, open: string, _inner: string, close: string) => {
+        const content = idx === 0 ? replaced : '';
+        idx++;
+        const finalOpen = content ? this.ensureXmlSpacePreserve(open, content) : open;
+        return `${finalOpen}${this.xmlEncodeText(content)}${close}`;
+      });
+    });
+
+    return out;
+  }
+
+  /**
+   * Ensure a <w:t ...> opening tag carries xml:space="preserve" when the new
+   * text contains leading/trailing whitespace — without it, Word trims spaces.
+   */
+  private ensureXmlSpacePreserve(openTag: string, text: string): string {
+    if (/xml:space\s*=/.test(openTag)) return openTag;
+    if (!/^\s|\s$/.test(text)) return openTag;
+    return openTag.replace(/^<w:t\b/, '<w:t xml:space="preserve"');
+  }
+
+  private xmlDecodeText(s: string): string {
+    return s
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&');
+  }
+
+  private xmlEncodeText(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 
   /**
@@ -200,140 +268,6 @@ export class DocxFormatterService {
     }
 
     return textNodes;
-  }
-
-  /**
-   * Apply PII replacements directly to XML text nodes
-   * Recursively walks the XML tree and replaces text in <w:t> nodes
-   */
-  private applyReplacementsToXml(obj: any, replacements: PiiReplacement[]): void {
-    if (!obj || typeof obj !== 'object') {
-      return;
-    }
-
-    // If we found a w:t element (text node), replace text
-    if ('w:t' in obj) {
-      const textContent = obj['w:t'];
-
-      if (Array.isArray(textContent)) {
-        textContent.forEach((item, index) => {
-          if (typeof item === 'string') {
-            obj['w:t'][index] = this.replaceAllOccurrences(item, replacements);
-          } else if (typeof item === 'object' && item._) {
-            item._ = this.replaceAllOccurrences(item._, replacements);
-          }
-        });
-      } else if (typeof textContent === 'string') {
-        obj['w:t'] = this.replaceAllOccurrences(textContent, replacements);
-      } else if (typeof textContent === 'object' && textContent._) {
-        textContent._ = this.replaceAllOccurrences(textContent._, replacements);
-      }
-    }
-
-    // Recursively process all properties
-    if (Array.isArray(obj)) {
-      obj.forEach((item) => {
-        this.applyReplacementsToXml(item, replacements);
-      });
-    } else {
-      Object.keys(obj).forEach((key) => {
-        this.applyReplacementsToXml(obj[key], replacements);
-      });
-    }
-  }
-
-  /**
-   * Walk the XML tree and, for every paragraph (<w:p>), concatenate the text
-   * from all descendant <w:t> nodes, run replacements against the full string,
-   * and redistribute the result when something changed. This catches PII split
-   * across adjacent runs (e.g. "SEAD" + " MEDITERRANEE" in different <w:r>).
-   *
-   * Redistribution puts the whole replaced string into the first <w:t> and
-   * clears the rest. In paragraphs that contained PII, per-run formatting
-   * (bold/italic spans inside the matched text) is collapsed — an acceptable
-   * trade-off to actually anonymize the content.
-   */
-  private applyReplacementsAcrossRuns(obj: any, replacements: PiiReplacement[]): void {
-    if (!obj || typeof obj !== 'object') return;
-
-    if ('w:p' in obj) {
-      const paragraph = obj['w:p'];
-      const paragraphs = Array.isArray(paragraph) ? paragraph : [paragraph];
-      for (const p of paragraphs) {
-        this.processParagraphForCrossRun(p, replacements);
-      }
-    }
-
-    if (Array.isArray(obj)) {
-      for (const item of obj) this.applyReplacementsAcrossRuns(item, replacements);
-    } else {
-      for (const key of Object.keys(obj)) {
-        if (key === 'w:p') continue; // already handled above
-        this.applyReplacementsAcrossRuns(obj[key], replacements);
-      }
-    }
-  }
-
-  private processParagraphForCrossRun(pNode: any, replacements: PiiReplacement[]): void {
-    if (!pNode || typeof pNode !== 'object') return;
-
-    type TextRef = { get: () => string; set: (s: string) => void };
-    const refs: TextRef[] = [];
-
-    const collect = (n: any): void => {
-      if (!n || typeof n !== 'object') return;
-      if ('w:t' in n) {
-        const tc = n['w:t'];
-        if (Array.isArray(tc)) {
-          tc.forEach((item, idx) => {
-            if (typeof item === 'string') {
-              refs.push({
-                get: () => n['w:t'][idx],
-                set: (s: string) => {
-                  n['w:t'][idx] = s;
-                },
-              });
-            } else if (item && typeof item === 'object' && '_' in item) {
-              refs.push({
-                get: () => item._,
-                set: (s: string) => {
-                  item._ = s;
-                },
-              });
-            }
-          });
-        } else if (typeof tc === 'string') {
-          refs.push({
-            get: () => n['w:t'],
-            set: (s: string) => {
-              n['w:t'] = s;
-            },
-          });
-        } else if (tc && typeof tc === 'object' && '_' in tc) {
-          refs.push({
-            get: () => tc._,
-            set: (s: string) => {
-              tc._ = s;
-            },
-          });
-        }
-      }
-      if (Array.isArray(n)) {
-        for (const child of n) collect(child);
-      } else {
-        for (const key of Object.keys(n)) collect(n[key]);
-      }
-    };
-    collect(pNode);
-
-    if (refs.length < 2) return; // single-node paragraphs were handled by pass 1
-
-    const original = refs.map((r) => r.get()).join('');
-    const replaced = this.replaceAllOccurrences(original, replacements);
-    if (replaced === original) return;
-
-    refs[0].set(replaced);
-    for (let i = 1; i < refs.length; i++) refs[i].set('');
   }
 
   /**
