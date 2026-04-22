@@ -6,6 +6,7 @@ import {
   PiiReplacement,
   RemainingPii,
 } from './llm.service';
+import { dictionaryService } from './dictionary.service';
 import { config } from '../config';
 import { EventEmitter } from 'events';
 
@@ -184,6 +185,11 @@ export class AnonymizationService {
         anonymizedChunks.push(chunkText);
       }
 
+      // Apply the persistent dictionary BEFORE pattern matching so that any
+      // word we've previously seen or that a user manually flagged is always
+      // caught, even if the LLM missed it and no pattern matches it.
+      this.augmentWithDictionary(text, allReplacements, globalMap, counters);
+
       // Safety net: the LLM sometimes misses structured PII, especially when
       // a piece appears in only one chunk and the surrounding context is thin.
       // Scan the original text for well-defined patterns (phone, email, URL,
@@ -235,6 +241,14 @@ export class AnonymizationService {
       const processingTimeMinutes = processingTimeMs / 60000;
       const wordsPerMinute = Math.round(wordCount / processingTimeMinutes);
 
+      // Persist all final replacements to the learned-words dictionary so
+      // future runs can match them deterministically.
+      try {
+        dictionaryService.recordFromReplacements(allReplacements);
+      } catch (err) {
+        console.warn('[Anonymize] Failed to record dictionary entries:', err);
+      }
+
       const response = {
         anonymizedText,
         piiDetected: allPiiDetected,
@@ -267,6 +281,57 @@ export class AnonymizationService {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Apply the persistent dictionary of learned/manual PII words. For each
+   * entry we search the original text case-insensitively on word boundaries
+   * and, if found and not already covered, push a replacement that reuses
+   * an existing placeholder (via globalMap) or allocates a new one.
+   */
+  private augmentWithDictionary(
+    text: string,
+    replacements: PiiReplacement[],
+    globalMap: Map<string, string>,
+    counters: Record<string, number>
+  ): void {
+    const entries = dictionaryService.list();
+    if (entries.length === 0) return;
+
+    const existingOriginals = new Set(replacements.map((r) => r.original.toLowerCase()));
+    const isCovered = (candidate: string): boolean => {
+      const c = candidate.toLowerCase();
+      if (existingOriginals.has(c)) return true;
+      for (const orig of existingOriginals) {
+        if (orig.includes(c) || c.includes(orig)) return true;
+      }
+      return false;
+    };
+
+    // Longest entries first so "Jean-Pierre MARTIN" is matched before "MARTIN"
+    const sorted = [...entries].sort((a, b) => b.original.length - a.original.length);
+
+    let added = 0;
+    for (const entry of sorted) {
+      if (isCovered(entry.original)) continue;
+      const escaped = entry.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu');
+      if (!regex.test(text)) continue;
+
+      const key = `${entry.category}|${entry.original.trim().toLowerCase()}`;
+      let ph = globalMap.get(key);
+      if (!ph) {
+        counters[entry.category] = (counters[entry.category] || 0) + 1;
+        ph = `[${entry.category}${counters[entry.category]}]`;
+        globalMap.set(key, ph);
+      }
+      replacements.push({ original: entry.original, anonymized: ph });
+      existingOriginals.add(entry.original.toLowerCase());
+      added++;
+    }
+    if (added > 0) {
+      console.log(`[Anonymize] Dictionary caught ${added} entry/entries`);
     }
   }
 

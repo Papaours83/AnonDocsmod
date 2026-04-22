@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { anonymizeRouter } from './routes/anonymize.routes';
 import { documentRouter } from './routes/document.routes';
 import { streamRouter } from './routes/stream.routes';
+import { dictionaryRouter } from './routes/dictionary.routes';
 import { errorHandler } from './middleware/error.middleware';
 import { config } from './config';
 import { docxFormatterService } from './services/docx-formatter.service';
@@ -24,6 +25,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/anonymize', anonymizeRouter);
 app.use('/api/document', documentRouter);
 app.use('/api/stream', streamRouter);
+app.use('/api/dictionary', dictionaryRouter);
 
 // Error handling
 app.use(errorHandler);
@@ -50,6 +52,9 @@ app.listen(port, () => {
   console.log(`GET  /api/document/download/:filename - Download DOCX`);
   console.log(`POST /api/stream/anonymize - Stream text anonymization progress`);
   console.log(`POST /api/stream/document - Stream document anonymization progress`);
+  console.log(`GET  /api/dictionary - List learned/manual PII entries`);
+  console.log(`POST /api/dictionary - Add entry (or batch) to the dictionary`);
+  console.log(`DELETE /api/dictionary - Remove an entry`);
 });
 
 // Graceful shutdown
