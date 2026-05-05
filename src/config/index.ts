@@ -50,7 +50,9 @@ export const config = {
   },
   anonymization: {
     // Second LLM pass on the already-anonymized text to catch PII the first
-    // pass missed (acronyms, short company codes, etc.). Default: ON.
-    enableSecondPass: process.env.ENABLE_SECOND_PASS !== 'false',
+    // pass missed (acronyms, short company codes, etc.). Default: OFF — too
+    // slow on large docs (3 iterations × N chunks). Re-enable explicitly
+    // with ENABLE_SECOND_PASS=true.
+    enableSecondPass: process.env.ENABLE_SECOND_PASS === 'true',
   },
 } as const;
