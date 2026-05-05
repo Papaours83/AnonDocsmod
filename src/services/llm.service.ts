@@ -185,19 +185,12 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
       content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
       content = content.replace(/<think>[\s\S]*$/i, '');
 
-      try {
-        // Extract JSON from response (handle cases where LLM adds markdown formatting)
-        const jsonMatch = content.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          throw new Error('No JSON found in response');
-        }
-
-        const result = JSON.parse(jsonMatch[0]) as AnonymizationResult;
-        return result;
-      } catch (error) {
+      const parsed = this.parseAnonymizationResponse(content);
+      if (!parsed) {
         console.error('Failed to parse LLM response:', content);
         throw new Error('Failed to parse anonymization response from LLM');
       }
+      return parsed;
     } catch (error: any) {
       // Handle connection errors with helpful messages
       if (error.cause) {
@@ -221,6 +214,163 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
       // Re-throw original error if not a connection issue
       throw error;
     }
+  }
+
+  /**
+   * Parse the anonymization response from the LLM. qwen3/vLLM (and other
+   * smaller models) sometimes produce malformed JSON — most often by closing
+   * the wrapper object early and putting "replacements" as a sibling rather
+   * than a child. We try two strategies:
+   *   1. Strict parse on the first balanced `{...}` block (fast path for
+   *      well-formed responses).
+   *   2. Per-field extraction with a brace-balanced walker, so the wrapper
+   *      structure can be malformed and we still recover anonymizedText,
+   *      piiDetected, and replacements.
+   */
+  private parseAnonymizationResponse(raw: string): AnonymizationResult | null {
+    const cleaned = this.stripMarkdownFences(raw);
+
+    // Strategy 1: balanced top-level JSON object
+    let strict: Partial<AnonymizationResult> | null = null;
+    const balanced = this.findFirstBalancedBlock(cleaned, '{', '}');
+    if (balanced) {
+      try {
+        strict = JSON.parse(balanced) as Partial<AnonymizationResult>;
+      } catch {
+        /* fall through to per-field extraction */
+      }
+    }
+
+    // Per-field extraction — also used to top-up missing fields when the LLM
+    // closed the wrapper early and put one of them outside (qwen3 does this).
+    const anonymizedText =
+      (strict?.anonymizedText as string | undefined) ??
+      this.extractStringField(cleaned, 'anonymizedText') ??
+      null;
+    if (anonymizedText === null) return null;
+
+    let piiDetected = strict?.piiDetected as AnonymizationResult['piiDetected'] | undefined;
+    if (!piiDetected) {
+      const piiRaw = this.extractBalancedField(cleaned, 'piiDetected', '{', '}');
+      piiDetected = piiRaw
+        ? this.tryParse<AnonymizationResult['piiDetected']>(piiRaw) ?? this.emptyPiiDetected()
+        : this.emptyPiiDetected();
+    }
+
+    let replacements = strict?.replacements as PiiReplacement[] | undefined;
+    if (!Array.isArray(replacements)) {
+      const repRaw = this.extractBalancedField(cleaned, 'replacements', '[', ']');
+      replacements = repRaw ? this.tryParse<PiiReplacement[]>(repRaw) ?? [] : [];
+    }
+
+    return {
+      anonymizedText,
+      piiDetected: this.normalizePiiDetected(piiDetected),
+      replacements: Array.isArray(replacements) ? replacements : [],
+    };
+  }
+
+  private stripMarkdownFences(content: string): string {
+    return content.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+  }
+
+  private findFirstBalancedBlock(content: string, open: string, close: string): string | null {
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < content.length; i++) {
+      const c = content[i];
+      if (escape) { escape = false; continue; }
+      if (inString && c === '\\') { escape = true; continue; }
+      if (c === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (c === open) {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (c === close) {
+        depth--;
+        if (depth === 0 && start !== -1) return content.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  private extractBalancedField(
+    content: string,
+    key: string,
+    open: string,
+    close: string
+  ): string | null {
+    const keyIdx = content.indexOf(`"${key}"`);
+    if (keyIdx === -1) return null;
+    const colon = content.indexOf(':', keyIdx);
+    if (colon === -1) return null;
+    const openIdx = content.indexOf(open, colon);
+    if (openIdx === -1) return null;
+    const slice = content.slice(openIdx);
+    return this.findFirstBalancedBlock(slice, open, close);
+  }
+
+  private extractStringField(content: string, key: string): string | null {
+    const keyIdx = content.indexOf(`"${key}"`);
+    if (keyIdx === -1) return null;
+    const colon = content.indexOf(':', keyIdx);
+    if (colon === -1) return null;
+    // Find the opening quote of the value
+    let i = colon + 1;
+    while (i < content.length && /\s/.test(content[i])) i++;
+    if (content[i] !== '"') return null;
+    const start = i;
+    i++;
+    let escape = false;
+    for (; i < content.length; i++) {
+      const c = content[i];
+      if (escape) { escape = false; continue; }
+      if (c === '\\') { escape = true; continue; }
+      if (c === '"') {
+        // Use JSON.parse to handle escapes (\n, \", \\, \uXXXX, etc.)
+        try {
+          return JSON.parse(content.slice(start, i + 1)) as string;
+        } catch {
+          return content.slice(start + 1, i);
+        }
+      }
+    }
+    return null;
+  }
+
+  private tryParse<T>(s: string): T | null {
+    try {
+      return JSON.parse(s) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private emptyPiiDetected(): AnonymizationResult['piiDetected'] {
+    return {
+      names: [],
+      addresses: [],
+      emails: [],
+      phoneNumbers: [],
+      dates: [],
+      organizations: [],
+    };
+  }
+
+  private normalizePiiDetected(p: any): AnonymizationResult['piiDetected'] {
+    const empty = this.emptyPiiDetected();
+    if (!p || typeof p !== 'object') return empty;
+    const arr = (v: any): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+    return {
+      names: arr(p.names),
+      addresses: arr(p.addresses),
+      emails: arr(p.emails),
+      phoneNumbers: arr(p.phoneNumbers),
+      dates: arr(p.dates),
+      organizations: arr(p.organizations),
+    };
   }
 
   private getProviderConnectionInfo(provider: LLMProvider): { url: string; suggestion: string } {
