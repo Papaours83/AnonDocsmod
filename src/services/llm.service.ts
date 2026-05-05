@@ -112,6 +112,8 @@ export class LLMService {
     }
   }
 
+  private chunkCounter = 0;
+
   async anonymizeChunk(text: string, provider?: LLMProvider): Promise<AnonymizationResult> {
     const selectedProvider = provider || config.llm.defaultProvider;
     const model = this.models.get(selectedProvider);
@@ -122,6 +124,10 @@ export class LLMService {
           `Please check your environment variables (${selectedProvider.toUpperCase()}_BASE_URL, ${selectedProvider.toUpperCase()}_MODEL).`
       );
     }
+
+    const chunkId = ++this.chunkCounter;
+    const startedAt = Date.now();
+    console.log(`[LLM] chunk #${chunkId} → ${selectedProvider} (${text.length} chars) — sending`);
 
     const systemPrompt = `/no_think
 You are an expert document anonymization assistant. Your task is to:
@@ -179,7 +185,11 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
 
     try {
       const response = await model.invoke(messages);
+      const elapsed = Date.now() - startedAt;
       let content = response.content.toString();
+      console.log(
+        `[LLM] chunk #${chunkId} ← response in ${elapsed}ms (${content.length} chars)`
+      );
 
       // Strip Qwen/DeepSeek-style <think>...</think> reasoning blocks (and unterminated ones)
       content = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -187,11 +197,15 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
 
       const parsed = this.parseAnonymizationResponse(content);
       if (!parsed) {
-        console.error('Failed to parse LLM response:', content);
+        console.error(`[LLM] chunk #${chunkId} parse FAILED, raw:`, content);
         throw new Error('Failed to parse anonymization response from LLM');
       }
       return parsed;
     } catch (error: any) {
+      console.warn(
+        `[LLM] chunk #${chunkId} threw after ${Date.now() - startedAt}ms:`,
+        error?.message || error
+      );
       // Handle connection errors with helpful messages
       if (error.cause) {
         const cause = error.cause;
