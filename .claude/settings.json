@@ -10,7 +10,13 @@
       "Bash(npm uninstall *)",
       "Bash(npm run *)",
       "Bash(npm ls *)",
-      "Bash(npx ts-node *)"
+      "Bash(npx ts-node *)",
+      "Bash(grep -iE \"frontend|public|client|\\\\.html|\\\\.component|\\\\.ts$\")",
+      "Bash(ls build *)",
+      "Bash(ls dist *)",
+      "Bash(python -c ' *)",
+      "Bash(python3 -)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,2\\)\\)\")"
     ]
   }
 }

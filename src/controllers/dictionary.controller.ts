@@ -12,12 +12,52 @@ const CATEGORIES: PiiCategory[] = [
   'Id',
 ];
 
+/**
+ * Maps category labels (French UI labels, case/accents variants) to the
+ * canonical English PiiCategory expected by the rest of the system.
+ */
+const CATEGORY_ALIASES: Record<string, PiiCategory> = {
+  name: 'Name',
+  nom: 'Name',
+  organization: 'Organization',
+  organisation: 'Organization',
+  organisme: 'Organization',
+  societe: 'Organization',
+  address: 'Address',
+  adresse: 'Address',
+  email: 'Email',
+  courriel: 'Email',
+  'e-mail': 'Email',
+  mail: 'Email',
+  phone: 'Phone',
+  telephone: 'Phone',
+  tel: 'Phone',
+  date: 'Date',
+  id: 'Id',
+  identifiant: 'Id',
+};
+
+/**
+ * Normalizes an incoming category value. Returns the canonical PiiCategory,
+ * or null if it cannot be mapped.
+ */
+function normalizeCategory(value: unknown): PiiCategory | null {
+  if (typeof value !== 'string') return null;
+  const key = value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // strip accents
+  return CATEGORY_ALIASES[key] ?? null;
+}
+
 export class DictionaryController {
   async list(req: Request, res: Response): Promise<void> {
     try {
-      const category = req.query.category as PiiCategory | undefined;
+      const rawCategory = req.query.category;
+      const category = rawCategory ? normalizeCategory(rawCategory) ?? undefined : undefined;
       const source = req.query.source as DictionarySource | undefined;
-      if (category && !CATEGORIES.includes(category)) {
+      if (rawCategory && !category) {
         res.status(400).json({ error: `Invalid category. Must be one of: ${CATEGORIES.join(', ')}` });
         return;
       }
@@ -39,19 +79,21 @@ export class DictionaryController {
     try {
       const body = req.body;
       if (Array.isArray(body?.entries)) {
-        const { added, updated } = dictionaryService.addBatch(
-          body.entries,
-          'manual'
-        );
+        const normalized = body.entries.map((e: { original: string; category: unknown }) => ({
+          original: e?.original,
+          category: normalizeCategory(e?.category) ?? e?.category,
+        }));
+        const { added, updated } = dictionaryService.addBatch(normalized, 'manual');
         res.json({ success: true, added, updated });
         return;
       }
-      const { original, category } = body || {};
+      const { original } = body || {};
+      const category = normalizeCategory(body?.category);
       if (!original || typeof original !== 'string') {
         res.status(400).json({ error: 'original is required and must be a string' });
         return;
       }
-      if (!category || !CATEGORIES.includes(category)) {
+      if (!category) {
         res.status(400).json({ error: `category must be one of: ${CATEGORIES.join(', ')}` });
         return;
       }
@@ -68,12 +110,12 @@ export class DictionaryController {
   async remove(req: Request, res: Response): Promise<void> {
     try {
       const original = req.query.original as string | undefined;
-      const category = req.query.category as PiiCategory | undefined;
+      const category = normalizeCategory(req.query.category);
       if (!original || typeof original !== 'string') {
         res.status(400).json({ error: 'original query param is required' });
         return;
       }
-      if (!category || !CATEGORIES.includes(category)) {
+      if (!category) {
         res.status(400).json({ error: `category query param must be one of: ${CATEGORIES.join(', ')}` });
         return;
       }
