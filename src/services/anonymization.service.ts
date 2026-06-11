@@ -51,6 +51,45 @@ export class AnonymizationService {
       // Chunk text
       const textChunks = chunkingService.chunkText(text);
 
+      // Pre-anonymize manual dictionary entries BEFORE the LLM sees them.
+      // Each match is replaced with a unique marker that the LLM passes
+      // through unchanged; markers are swapped for proper [Category{N}]
+      // placeholders after aggregation. This guarantees user-added words
+      // are always anonymized, regardless of what the LLM detects.
+      const manualEntries = dictionaryService.list({ source: 'manual' });
+      type ManualHit = { original: string; category: string; marker: string };
+      const manualHits = new Map<string, ManualHit>();
+      const sortedManual = [...manualEntries].sort(
+        (a, b) => b.original.length - a.original.length
+      );
+      const escapeForRegex = (s: string) =>
+        s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const markerOf = (n: number) =>
+        `__PIIM_${String(n).padStart(4, '0')}__`;
+
+      const llmChunks = textChunks.map((chunk) => {
+        let out = chunk;
+        for (const entry of sortedManual) {
+          const regex = new RegExp(
+            `(?<![\\p{L}\\p{N}])${escapeForRegex(entry.original)}(?![\\p{L}\\p{N}])`,
+            'giu'
+          );
+          if (!regex.test(out)) continue;
+          const key = `${entry.category}|${entry.original.trim().toLowerCase()}`;
+          let hit = manualHits.get(key);
+          if (!hit) {
+            hit = {
+              original: entry.original,
+              category: entry.category,
+              marker: markerOf(manualHits.size + 1),
+            };
+            manualHits.set(key, hit);
+          }
+          out = out.replace(regex, hit.marker);
+        }
+        return out;
+      });
+
       // Emit started event
       if (progressEmitter) {
         progressEmitter.emit('progress', {
@@ -84,13 +123,13 @@ export class AnonymizationService {
           } as ProgressEvent);
         }
         results = await Promise.all(
-          textChunks.map((chunk) => llmService.anonymizeChunk(chunk, provider))
+          llmChunks.map((chunk) => llmService.anonymizeChunk(chunk, provider))
         );
       } else {
         // Process chunks sequentially
         results = [];
-        for (let i = 0; i < textChunks.length; i++) {
-          const chunk = textChunks[i];
+        for (let i = 0; i < llmChunks.length; i++) {
+          const chunk = llmChunks[i];
 
           if (progressEmitter) {
             progressEmitter.emit('progress', {
@@ -185,6 +224,32 @@ export class AnonymizationService {
         anonymizedChunks.push(chunkText);
       }
 
+      // Swap manual-entry markers (inserted before the LLM) for proper
+      // [Category{N}] placeholders, allocating fresh numbers via the global
+      // map/counters so they don't collide with LLM-assigned ones.
+      if (manualHits.size > 0) {
+        for (let i = 0; i < anonymizedChunks.length; i++) {
+          let chunkText = anonymizedChunks[i];
+          for (const hit of manualHits.values()) {
+            if (!chunkText.includes(hit.marker)) continue;
+            const key = `${hit.category}|${hit.original.trim().toLowerCase()}`;
+            let ph = globalMap.get(key);
+            if (!ph) {
+              counters[hit.category] = (counters[hit.category] || 0) + 1;
+              ph = `[${hit.category}${counters[hit.category]}]`;
+              globalMap.set(key, ph);
+            }
+            chunkText = chunkText.split(hit.marker).join(ph);
+            if (!allReplacements.some(
+              (r) => r.original === hit.original && r.anonymized === ph
+            )) {
+              allReplacements.push({ original: hit.original, anonymized: ph });
+            }
+          }
+          anonymizedChunks[i] = chunkText;
+        }
+      }
+
       // Apply the persistent dictionary BEFORE pattern matching so that any
       // word we've previously seen or that a user manually flagged is always
       // caught, even if the LLM missed it and no pattern matches it.
@@ -241,13 +306,8 @@ export class AnonymizationService {
       const processingTimeMinutes = processingTimeMs / 60000;
       const wordsPerMinute = Math.round(wordCount / processingTimeMinutes);
 
-      // Persist all final replacements to the learned-words dictionary so
-      // future runs can match them deterministically.
-      try {
-        dictionaryService.recordFromReplacements(allReplacements);
-      } catch (err) {
-        console.warn('[Anonymize] Failed to record dictionary entries:', err);
-      }
+      // Note: detected entries are intentionally NOT auto-recorded to the
+      // dictionary. Only user-added (manual) entries should persist there.
 
       const response = {
         anonymizedText,
@@ -577,7 +637,12 @@ export class AnonymizationService {
     let out = text;
     for (const rep of sorted) {
       const escaped = rep.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      out = out.replace(new RegExp(escaped, 'g'), rep.anonymized);
+      // Word boundaries (Unicode letters/digits) so e.g. "CA" doesn't match
+      // inside "CASSER". Replacement only fires on whole tokens.
+      out = out.replace(
+        new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'gu'),
+        rep.anonymized
+      );
     }
     return out;
   }
