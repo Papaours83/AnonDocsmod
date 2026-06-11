@@ -22,7 +22,6 @@ const DICT_PATH = path.join(DATA_DIR, 'dictionary.json');
 
 const VALID_CATEGORIES: PiiCategory[] = [
   'Name',
-  'Organization',
   'Address',
   'Email',
   'Phone',

@@ -14,7 +14,7 @@ router.get('/', (req, res) => dictionaryController.list(req, res));
  * POST /api/dictionary
  * Add an entry (or a batch) to the dictionary, marked as source=manual.
  *
- * Single: { "original": "ACME SAS", "category": "Organization" }
+ * Single: { "original": "Jean Dupont", "category": "Name" }
  * Batch:  { "entries": [{ "original": "...", "category": "..." }, ...] }
  */
 router.post('/', (req, res) => dictionaryController.add(req, res));

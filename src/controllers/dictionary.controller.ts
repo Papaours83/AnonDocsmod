@@ -4,7 +4,6 @@ import { PiiCategory } from '../services/llm.service';
 
 const CATEGORIES: PiiCategory[] = [
   'Name',
-  'Organization',
   'Address',
   'Email',
   'Phone',
@@ -15,14 +14,11 @@ const CATEGORIES: PiiCategory[] = [
 /**
  * Maps category labels (French UI labels, case/accents variants) to the
  * canonical English PiiCategory expected by the rest of the system.
+ * Organization is intentionally absent — organizations are out of scope.
  */
 const CATEGORY_ALIASES: Record<string, PiiCategory> = {
   name: 'Name',
   nom: 'Name',
-  organization: 'Organization',
-  organisation: 'Organization',
-  organisme: 'Organization',
-  societe: 'Organization',
   address: 'Address',
   adresse: 'Address',
   email: 'Email',

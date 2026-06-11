@@ -20,14 +20,12 @@ export interface AnonymizationResult {
     emails: string[];
     phoneNumbers: string[];
     dates: string[];
-    organizations: string[];
   };
   replacements: PiiReplacement[];
 }
 
 export type PiiCategory =
   | 'Name'
-  | 'Organization'
   | 'Address'
   | 'Email'
   | 'Phone'
@@ -132,7 +130,7 @@ export class LLMService {
     const systemPrompt = `/no_think
 You are an expert document anonymization assistant. Your task is to:
 1. Identify and remove all Personally Identifiable Information (PII) from the text
-2. Replace PII with generic placeholders like [NAME], [ADDRESS], [EMAIL], [PHONE], [DATE], [ORGANIZATION]
+2. Replace PII with generic placeholders like [NAME], [ADDRESS], [EMAIL], [PHONE], [DATE]
 3. Maintain the document's structure and readability
 4. Return both the anonymized text, a JSON list of detected PII, AND a precise mapping of what was replaced
 
@@ -144,20 +142,18 @@ PII includes (be AGGRESSIVE — when in doubt, anonymize):
 - Email addresses
 - Phone numbers
 - Dates of birth or identifying dates
-- ALL organization names — companies, subcontractors, suppliers, clients, associations, administrations. Do NOT restrict to organizations that "identify individuals": any proper-noun organization must be replaced.
-- Brand names, product names, trade names (e.g. "Celio", "Macrolot")
-- Short codes, acronyms, and internal project/lot references that look like identifiers
-  (e.g. "AG83", "PAP", "SR PLUS", "VAR TOITURES"). Any UPPERCASE
-  token of 2+ letters that is not a common word should be treated as an organization/code.
-  Multi-word company names where one word is a common noun (e.g. "VAR TOITURES",
-  "SR PLUS") still count — replace the full expression.
 - ID numbers (social security, passport, driver's license, SIRET, etc.)
 - Financial information (credit card, bank account numbers)
+
+DO NOT anonymize organization names, companies, subcontractors, suppliers,
+clients, associations, administrations, brand names, product names, trade
+names, project codes, lot references, or UPPERCASE acronyms. Organizations are
+explicitly OUT of scope — leave them in the text.
 
 When scanning, pay special attention to tables, bullet lists, and signature blocks —
 PII is often dense there and easy to miss.
 
-IMPORTANT: In the "replacements" array, list EVERY single replacement you made with the EXACT original text and what you replaced it with. Include every distinct occurrence of the same entity if the surface form differs (e.g. "VAR TOITURES" and "Var Toitures" are two entries).
+IMPORTANT: In the "replacements" array, list EVERY single replacement you made with the EXACT original text and what you replaced it with. Include every distinct occurrence of the same entity if the surface form differs.
 
 Respond with a JSON object in this exact format:
 {
@@ -167,16 +163,15 @@ Respond with a JSON object in this exact format:
     "addresses": ["list of detected addresses"],
     "emails": ["list of detected emails"],
     "phoneNumbers": ["list of detected phone numbers"],
-    "dates": ["list of detected dates"],
-    "organizations": ["list of detected organizations"]
+    "dates": ["list of detected dates"]
   },
   "replacements": [
     {"original": "exact original text", "anonymized": "[Name]"},
-    {"original": "another original", "anonymized": "[Organization]"}
+    {"original": "another original", "anonymized": "[Address]"}
   ]
 }
 
-Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email], [Phone], [Date], [Id]. Do NOT invent categories like [Other], [Project], [Code], etc. — classify every finding into one of those seven.`;
+Use ONLY these placeholder categories: [Name], [Address], [Email], [Phone], [Date], [Id]. Do NOT use [Organization], [Other], [Project], [Code], etc. — classify every finding into one of those six, or omit it.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -369,7 +364,6 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
       emails: [],
       phoneNumbers: [],
       dates: [],
-      organizations: [],
     };
   }
 
@@ -383,7 +377,6 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
       emails: arr(p.emails),
       phoneNumbers: arr(p.phoneNumbers),
       dates: arr(p.dates),
-      organizations: arr(p.organizations),
     };
   }
 
@@ -420,7 +413,7 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
 
   /**
    * Second pass: given text that has already been partially anonymized (with
-   * placeholders like [Name1], [Organization2]), ask the LLM to list PII that
+   * placeholders like [Name1], [Address2]), ask the LLM to list PII that
    * is still present in clear form. Existing placeholders must be ignored.
    * Returns an array of {original, category} — callers assign placeholders.
    */
@@ -438,22 +431,20 @@ Use ONLY these placeholder categories: [Name], [Organization], [Address], [Email
 
     const systemPrompt = `/no_think
 You are a PII auditor. The text you will see has ALREADY been partially anonymized:
-tokens in square brackets like [Name1], [Organization2], [Address3], [Phone4],
-[Email5], [Date6], [Id7] are EXISTING placeholders — you MUST ignore
-them and never include them in your output.
+tokens in square brackets like [Name1], [Address3], [Phone4], [Email5],
+[Date6], [Id7] are EXISTING placeholders — you MUST ignore them and never
+include them in your output.
 
 Your task: scan the text and list EVERY remaining piece of PII that is still in
 clear form (i.e. was missed by the first anonymization pass). Be AGGRESSIVE.
 
 Look especially for:
 - Personal names (first names, last names, full names, "Prénom NOM" patterns)
-- Organization names, companies, subcontractors, suppliers, clients, brand names,
-  product names, trade names
-- Short codes / acronyms / internal project or lot references that look like
-  identifiers (e.g. "AG83", "PAP", "SR PLUS", "VAR TOITURES", "Macrolot",
-  "Lot 6"). Any UPPERCASE token of 2+ letters that is not a common word is
-  likely PII.
 - Addresses, phone numbers, emails, identifying dates, ID numbers
+
+DO NOT report organization names, companies, subcontractors, suppliers, clients,
+brand names, product names, trade names, project codes, lot references, or
+UPPERCASE acronyms — they are explicitly out of scope.
 
 Rules:
 - Do NOT include any [Placeholder] token — they are already anonymized.
@@ -465,12 +456,12 @@ Respond with ONLY a JSON object, no prose, no markdown fences:
 {
   "remainingPii": [
     {"original": "exact string from the text", "category": "Name"},
-    {"original": "...", "category": "Organization"}
+    {"original": "...", "category": "Address"}
   ]
 }
 
-Allowed categories (use EXACTLY one of these — no others): Name, Organization, Address, Email, Phone, Date, Id.
-For anything that doesn't clearly fit Name/Address/Email/Phone/Date/Id, use Organization.`;
+Allowed categories (use EXACTLY one of these — no others): Name, Address, Email, Phone, Date, Id.
+Anything that doesn't clearly fit one of those six must be omitted, not classified as a fallback.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -491,7 +482,6 @@ For anything that doesn't clearly fit Name/Address/Email/Phone/Date/Id, use Orga
 
       const allowed: ReadonlySet<PiiCategory> = new Set<PiiCategory>([
         'Name',
-        'Organization',
         'Address',
         'Email',
         'Phone',

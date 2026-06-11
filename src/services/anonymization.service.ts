@@ -107,7 +107,6 @@ export class AnonymizationService {
         emails: [],
         phoneNumbers: [],
         dates: [],
-        organizations: [],
       };
 
       let results: AnonymizationResult[];
@@ -162,12 +161,13 @@ export class AnonymizationService {
       const globalMap = new Map<string, string>();
       const counters: Record<string, number> = {};
 
-      // Normalize the LLM's placeholder into one of the seven allowed
-      // categories. Anything we can't confidently classify falls back to
-      // Organization — acts as a catch-all for unidentified proper nouns.
-      const categoryFromPlaceholder = (ph: string): string => {
+      // Normalize the LLM's placeholder into one of the six allowed
+      // categories. Returns null for anything unmappable (including
+      // Organization, which we explicitly do NOT anonymize) so the caller
+      // can restore the original text.
+      const categoryFromPlaceholder = (ph: string): string | null => {
         const m = ph.match(/\[([A-Za-z_ ]+?)\d*\]/);
-        if (!m) return 'Organization';
+        if (!m) return null;
         const raw = m[1].trim().toLowerCase().replace(/[_\s]/g, '');
         const mapping: Record<string, string> = {
           name: 'Name',
@@ -182,12 +182,9 @@ export class AnonymizationService {
           phonenumbers: 'Phone',
           date: 'Date',
           dates: 'Date',
-          organization: 'Organization',
-          organizations: 'Organization',
-          org: 'Organization',
           id: 'Id',
         };
-        return mapping[raw] || 'Organization';
+        return mapping[raw] || null;
       };
 
       for (const result of results) {
@@ -200,12 +197,20 @@ export class AnonymizationService {
         if (result.piiDetected.phoneNumbers)
           allPiiDetected.phoneNumbers.push(...result.piiDetected.phoneNumbers);
         if (result.piiDetected.dates) allPiiDetected.dates.push(...result.piiDetected.dates);
-        if (result.piiDetected.organizations)
-          allPiiDetected.organizations.push(...result.piiDetected.organizations);
 
         const chunkReplacements = result.replacements || [];
         for (const rep of chunkReplacements) {
           const category = categoryFromPlaceholder(rep.anonymized);
+          if (!category) {
+            // LLM anonymized something we don't want anonymized (e.g. an
+            // organization). Put the original text back in the chunk.
+            const idx = chunkText.indexOf(rep.anonymized);
+            if (idx !== -1) {
+              chunkText =
+                chunkText.slice(0, idx) + rep.original + chunkText.slice(idx + rep.anonymized.length);
+            }
+            continue;
+          }
           const key = `${category}|${rep.original.trim().toLowerCase()}`;
           let newPh = globalMap.get(key);
           if (!newPh) {
@@ -444,12 +449,6 @@ export class AnonymizationService {
       'Maître', 'Me', 'Prof', 'Professeur',
     ]);
 
-    const isAllStoplisted = (s: string, stoplist: Set<string>): boolean => {
-      const tokens = s.split(/[\s-]+/).filter(Boolean);
-      if (tokens.length === 0) return false;
-      return tokens.every((t) => stoplist.has(t));
-    };
-
     type Pattern = {
       regex: RegExp;
       category: string;
@@ -509,22 +508,9 @@ export class AnonymizationService {
           return true;
         },
       },
-      // 2+ consecutive UPPERCASE words — company / multi-word acronym
-      // ("VAR TOITURES", "SR PLUS", "SOCOTEC MOE", "CSPS SOCOTEC")
-      {
-        regex:
-          /\b[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ0-9]+(?:\s+[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ0-9]+)+\b/g,
-        category: 'Organization',
-        minLen: 5,
-        filter: (match) => !isAllStoplisted(match, ROLE_STOPLIST),
-      },
-      // Alphanumeric UPPERCASE code ("AG83", "PAP83", "R12", "ZAC2024")
-      {
-        regex: /\b[A-Z]{2,}\d+\b/g,
-        category: 'Organization',
-        minLen: 3,
-        filter: (match) => !ROLE_STOPLIST.has(match.replace(/\d+$/, '')),
-      },
+      // Organization-style patterns (multi-word UPPERCASE, alphanumeric
+      // codes) are intentionally NOT included — organizations are out of
+      // scope for anonymization.
     ];
 
     const addedHere: PiiReplacement[] = [];
@@ -591,7 +577,6 @@ export class AnonymizationService {
 
     const categoryToBucket: Partial<Record<string, keyof AnonymizationResult['piiDetected']>> = {
       Name: 'names',
-      Organization: 'organizations',
       Address: 'addresses',
       Email: 'emails',
       Phone: 'phoneNumbers',
@@ -638,9 +623,10 @@ export class AnonymizationService {
     for (const rep of sorted) {
       const escaped = rep.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // Word boundaries (Unicode letters/digits) so e.g. "CA" doesn't match
-      // inside "CASSER". Replacement only fires on whole tokens.
+      // inside "CASSER". Case-insensitive so "Gestion" / "gestion" / "GESTION"
+      // all anonymize from a single dictionary entry.
       out = out.replace(
-        new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'gu'),
+        new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu'),
         rep.anonymized
       );
     }
