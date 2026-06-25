@@ -129,8 +129,40 @@ export class ParserService {
   }
 
   private async parseDocx(filePath: string): Promise<string> {
-    const result = await mammoth.extractRawText({ path: filePath });
-    return result.value;
+    // Use HTML conversion (not extractRawText) so table structure survives.
+    // Mammoth's raw-text mode concatenates cell text without delimiters,
+    // which hides row/column boundaries from the LLM and tanks detection
+    // inside tables.
+    const result = await mammoth.convertToHtml({ path: filePath });
+    return this.htmlToTextWithTables(result.value);
+  }
+
+  /**
+   * Strip HTML to plain text while keeping table layout visible:
+   * - rows end with newline
+   * - cells separated by tabs
+   * - paragraphs / list items / line breaks become newlines
+   * The LLM then sees tables as readable tabular text instead of a blob.
+   */
+  private htmlToTextWithTables(html: string): string {
+    let out = html;
+    out = out.replace(/<\/tr>/gi, '\n');
+    out = out.replace(/<\/t[dh]>/gi, '\t');
+    out = out.replace(/<\/p>/gi, '\n');
+    out = out.replace(/<br\s*\/?>/gi, '\n');
+    out = out.replace(/<\/li>/gi, '\n');
+    out = out.replace(/<[^>]+>/g, '');
+    out = out
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&');
+    out = out.replace(/\t+\n/g, '\n');
+    out = out.replace(/[ \t]+\n/g, '\n');
+    out = out.replace(/\n{3,}/g, '\n\n');
+    return out.trim();
   }
 
   private async parseTxt(filePath: string): Promise<string> {
