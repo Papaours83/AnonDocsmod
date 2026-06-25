@@ -4,9 +4,11 @@ import {
   LLMProvider,
   AnonymizationResult,
   PiiReplacement,
+  PiiCategory,
   RemainingPii,
 } from './llm.service';
 import { dictionaryService } from './dictionary.service';
+import { placeholderMapService } from './placeholder-map.service';
 import { config } from '../config';
 import { EventEmitter } from 'events';
 
@@ -153,11 +155,12 @@ export class AnonymizationService {
         }
       }
 
-      // Aggregate results with global numbered placeholders ([Name1], [Name2], ...)
+      // Aggregate results. Placeholder allocation goes through the persistent
+      // map service so the same (category, original) always resolves to the
+      // same [Category{N}] across requests — e.g. "Benoit Dutrou" → [Name1]
+      // in every document, even when the global counter has reached [Name350].
       const anonymizedChunks: string[] = [];
       const allReplacements: PiiReplacement[] = [];
-      const globalMap = new Map<string, string>();
-      const counters: Record<string, number> = {};
 
       // Normalize the LLM's placeholder into one of the six allowed
       // categories. Returns null for anything unmappable (including
@@ -202,13 +205,7 @@ export class AnonymizationService {
             }
             continue;
           }
-          const key = `${category}|${rep.original.trim().toLowerCase()}`;
-          let newPh = globalMap.get(key);
-          if (!newPh) {
-            counters[category] = (counters[category] || 0) + 1;
-            newPh = `[${category}${counters[category]}]`;
-            globalMap.set(key, newPh);
-          }
+          const newPh = placeholderMapService.resolve(category as PiiCategory, rep.original);
           const idx = chunkText.indexOf(rep.anonymized);
           if (idx !== -1) {
             chunkText =
@@ -221,20 +218,14 @@ export class AnonymizationService {
       }
 
       // Swap manual-entry markers (inserted before the LLM) for proper
-      // [Category{N}] placeholders, allocating fresh numbers via the global
-      // map/counters so they don't collide with LLM-assigned ones.
+      // [Category{N}] placeholders via the persistent map service — same
+      // (category, original) always resolves to the same number.
       if (manualHits.size > 0) {
         for (let i = 0; i < anonymizedChunks.length; i++) {
           let chunkText = anonymizedChunks[i];
           for (const hit of manualHits.values()) {
             if (!chunkText.includes(hit.marker)) continue;
-            const key = `${hit.category}|${hit.original.trim().toLowerCase()}`;
-            let ph = globalMap.get(key);
-            if (!ph) {
-              counters[hit.category] = (counters[hit.category] || 0) + 1;
-              ph = `[${hit.category}${counters[hit.category]}]`;
-              globalMap.set(key, ph);
-            }
+            const ph = placeholderMapService.resolve(hit.category as PiiCategory, hit.original);
             chunkText = chunkText.split(hit.marker).join(ph);
             if (!allReplacements.some(
               (r) => r.original === hit.original && r.anonymized === ph
@@ -249,14 +240,14 @@ export class AnonymizationService {
       // Apply the persistent dictionary BEFORE pattern matching so that any
       // word we've previously seen or that a user manually flagged is always
       // caught, even if the LLM missed it and no pattern matches it.
-      this.augmentWithDictionary(text, allReplacements, globalMap, counters);
+      this.augmentWithDictionary(text, allReplacements);
 
       // Safety net: the LLM sometimes misses structured PII, especially when
       // a piece appears in only one chunk and the surrounding context is thin.
       // Scan the original text for well-defined patterns (phone, email, URL,
       // SIRET) and add any match that isn't already covered. These run AFTER
       // the LLM so they don't disturb its output.
-      this.augmentWithDeterministicPatterns(text, allReplacements, counters);
+      this.augmentWithDeterministicPatterns(text, allReplacements);
 
       // Combine anonymized chunks
       let anonymizedText = anonymizedChunks.join('\n\n');
@@ -283,8 +274,6 @@ export class AnonymizationService {
             anonymizedText,
             allReplacements,
             allPiiDetected,
-            globalMap,
-            counters,
             provider
           );
           if (added === 0) {
@@ -344,13 +333,12 @@ export class AnonymizationService {
    * Apply the persistent dictionary of learned/manual PII words. For each
    * entry we search the original text case-insensitively on word boundaries
    * and, if found and not already covered, push a replacement that reuses
-   * an existing placeholder (via globalMap) or allocates a new one.
+   * an existing placeholder (via the persistent placeholder map) or
+   * allocates a new one through the same service.
    */
   private augmentWithDictionary(
     text: string,
-    replacements: PiiReplacement[],
-    globalMap: Map<string, string>,
-    counters: Record<string, number>
+    replacements: PiiReplacement[]
   ): void {
     const entries = dictionaryService.list();
     if (entries.length === 0) return;
@@ -375,13 +363,7 @@ export class AnonymizationService {
       const regex = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu');
       if (!regex.test(text)) continue;
 
-      const key = `${entry.category}|${entry.original.trim().toLowerCase()}`;
-      let ph = globalMap.get(key);
-      if (!ph) {
-        counters[entry.category] = (counters[entry.category] || 0) + 1;
-        ph = `[${entry.category}${counters[entry.category]}]`;
-        globalMap.set(key, ph);
-      }
+      const ph = placeholderMapService.resolve(entry.category, entry.original);
       replacements.push({ original: entry.original, anonymized: ph });
       existingOriginals.add(entry.original.toLowerCase());
       added++;
@@ -393,15 +375,14 @@ export class AnonymizationService {
 
   /**
    * Append deterministic replacements for PII patterns the LLM may have
-   * missed. Mutates `replacements` and `counters` in place. Only adds a match
+   * missed. Mutates `replacements` in place. Only adds a match
    * if it isn't already an original in the existing replacements list and
    * isn't contained within an existing original (to avoid double-covering
    * parts of a longer address or signature block).
    */
   private augmentWithDeterministicPatterns(
     text: string,
-    replacements: PiiReplacement[],
-    counters: Record<string, number>
+    replacements: PiiReplacement[]
   ): void {
     const existing = replacements.map((r) => r.original);
     const isCovered = (candidate: string): boolean => {
@@ -442,7 +423,7 @@ export class AnonymizationService {
 
     type Pattern = {
       regex: RegExp;
-      category: string;
+      category: PiiCategory;
       minLen?: number;
       filter?: (match: string) => boolean;
     };
@@ -508,8 +489,7 @@ export class AnonymizationService {
       }
       for (const match of found) {
         if (isCovered(match)) continue;
-        counters[category] = (counters[category] || 0) + 1;
-        const placeholder = `[${category}${counters[category]}]`;
+        const placeholder = placeholderMapService.resolve(category, match);
         const rep = { original: match, anonymized: placeholder };
         replacements.push(rep);
         addedHere.push(rep);
@@ -527,16 +507,14 @@ export class AnonymizationService {
   /**
    * Second-pass audit. Chunks the already-anonymized text, asks the LLM to
    * surface any PII still in clear form, and merges the findings into the
-   * shared replacements list (using the same global counters/globalMap so
-   * placeholder numbering stays consistent with the first pass).
+   * shared replacements list (using the persistent placeholder map so
+   * numbering stays consistent with the first pass AND across documents).
    * Returns the number of new replacements added.
    */
   private async runSecondPassAudit(
     anonymizedText: string,
     replacements: PiiReplacement[],
     piiDetected: AnonymizationResult['piiDetected'],
-    globalMap: Map<string, string>,
-    counters: Record<string, number>,
     provider?: LLMProvider
   ): Promise<number> {
     const existingOriginals = new Set(replacements.map((r) => r.original));
@@ -574,13 +552,7 @@ export class AnonymizationService {
         if (existingOriginals.has(original)) continue;
 
         const category = item.category;
-        const key = `${category}|${original.trim().toLowerCase()}`;
-        let ph = globalMap.get(key);
-        if (!ph) {
-          counters[category] = (counters[category] || 0) + 1;
-          ph = `[${category}${counters[category]}]`;
-          globalMap.set(key, ph);
-        }
+        const ph = placeholderMapService.resolve(category, original);
         replacements.push({ original, anonymized: ph });
         existingOriginals.add(original);
         added++;
