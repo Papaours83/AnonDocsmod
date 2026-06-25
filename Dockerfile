@@ -31,8 +31,10 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
 
-# Create uploads and downloads directories
-RUN mkdir -p uploads downloads && chown -R node:node uploads downloads
+# Create uploads, downloads and data directories
+# `data` holds the persistent dictionary (dictionary.json) — must be mounted
+# as a volume in docker-compose to survive container rebuilds.
+RUN mkdir -p uploads downloads data && chown -R node:node uploads downloads data
 
 # Switch to non-root user
 USER node
