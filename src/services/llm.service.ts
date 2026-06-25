@@ -16,20 +16,16 @@ export interface AnonymizationResult {
   anonymizedText: string;
   piiDetected: {
     names: string[];
-    addresses: string[];
     emails: string[];
     phoneNumbers: string[];
-    dates: string[];
   };
   replacements: PiiReplacement[];
 }
 
 export type PiiCategory =
   | 'Name'
-  | 'Address'
   | 'Email'
   | 'Phone'
-  | 'Date'
   | 'Id';
 
 export interface RemainingPii {
@@ -130,7 +126,7 @@ export class LLMService {
     const systemPrompt = `/no_think
 You are an expert document anonymization assistant. Your task is to:
 1. Identify and remove all Personally Identifiable Information (PII) from the text
-2. Replace PII with generic placeholders like [NAME], [ADDRESS], [EMAIL], [PHONE], [DATE]
+2. Replace PII with generic placeholders like [NAME], [EMAIL], [PHONE], [ID]
 3. Maintain the document's structure and readability
 4. Return both the anonymized text, a JSON list of detected PII, AND a precise mapping of what was replaced
 
@@ -138,17 +134,16 @@ Keep the original language of the text.
 
 PII includes (be AGGRESSIVE — when in doubt, anonymize):
 - Personal names (first names, last names, full names, initials followed by a surname)
-- Physical addresses
 - Email addresses
 - Phone numbers
-- Dates of birth or identifying dates
 - ID numbers (social security, passport, driver's license, SIRET, etc.)
 - Financial information (credit card, bank account numbers)
 
-DO NOT anonymize organization names, companies, subcontractors, suppliers,
-clients, associations, administrations, brand names, product names, trade
-names, project codes, lot references, or UPPERCASE acronyms. Organizations are
-explicitly OUT of scope — leave them in the text.
+DO NOT anonymize:
+- Organization names, companies, subcontractors, suppliers, clients, brand names, project codes, lot references, UPPERCASE acronyms — out of scope.
+- Physical addresses, street names, postal codes, cities — out of scope.
+- Dates of any kind (birth dates, deadlines, signature dates, etc.) — out of scope.
+Leave them in the text exactly as written.
 
 When scanning, pay special attention to tables, bullet lists, and signature blocks —
 PII is often dense there and easy to miss.
@@ -160,18 +155,16 @@ Respond with a JSON object in this exact format:
   "anonymizedText": "the anonymized text here",
   "piiDetected": {
     "names": ["list of detected names"],
-    "addresses": ["list of detected addresses"],
     "emails": ["list of detected emails"],
-    "phoneNumbers": ["list of detected phone numbers"],
-    "dates": ["list of detected dates"]
+    "phoneNumbers": ["list of detected phone numbers"]
   },
   "replacements": [
     {"original": "exact original text", "anonymized": "[Name]"},
-    {"original": "another original", "anonymized": "[Address]"}
+    {"original": "another original", "anonymized": "[Phone]"}
   ]
 }
 
-Use ONLY these placeholder categories: [Name], [Address], [Email], [Phone], [Date], [Id]. Do NOT use [Organization], [Other], [Project], [Code], etc. — classify every finding into one of those six, or omit it.`;
+Use ONLY these placeholder categories: [Name], [Email], [Phone], [Id]. Do NOT use [Address], [Date], [Organization], [Other], etc. — classify every finding into one of those four, or omit it.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -360,10 +353,8 @@ Use ONLY these placeholder categories: [Name], [Address], [Email], [Phone], [Dat
   private emptyPiiDetected(): AnonymizationResult['piiDetected'] {
     return {
       names: [],
-      addresses: [],
       emails: [],
       phoneNumbers: [],
-      dates: [],
     };
   }
 
@@ -373,10 +364,8 @@ Use ONLY these placeholder categories: [Name], [Address], [Email], [Phone], [Dat
     const arr = (v: any): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
     return {
       names: arr(p.names),
-      addresses: arr(p.addresses),
       emails: arr(p.emails),
       phoneNumbers: arr(p.phoneNumbers),
-      dates: arr(p.dates),
     };
   }
 
@@ -431,20 +420,20 @@ Use ONLY these placeholder categories: [Name], [Address], [Email], [Phone], [Dat
 
     const systemPrompt = `/no_think
 You are a PII auditor. The text you will see has ALREADY been partially anonymized:
-tokens in square brackets like [Name1], [Address3], [Phone4], [Email5],
-[Date6], [Id7] are EXISTING placeholders — you MUST ignore them and never
-include them in your output.
+tokens in square brackets like [Name1], [Phone4], [Email5], [Id7] are EXISTING
+placeholders — you MUST ignore them and never include them in your output.
 
 Your task: scan the text and list EVERY remaining piece of PII that is still in
 clear form (i.e. was missed by the first anonymization pass). Be AGGRESSIVE.
 
 Look especially for:
 - Personal names (first names, last names, full names, "Prénom NOM" patterns)
-- Addresses, phone numbers, emails, identifying dates, ID numbers
+- Phone numbers, emails, ID numbers
 
-DO NOT report organization names, companies, subcontractors, suppliers, clients,
-brand names, product names, trade names, project codes, lot references, or
-UPPERCASE acronyms — they are explicitly out of scope.
+DO NOT report:
+- Organization names, companies, subcontractors, suppliers, clients, brand names, project codes, lot references, UPPERCASE acronyms — out of scope.
+- Addresses, street names, postal codes, cities — out of scope.
+- Dates of any kind — out of scope.
 
 Rules:
 - Do NOT include any [Placeholder] token — they are already anonymized.
@@ -456,12 +445,12 @@ Respond with ONLY a JSON object, no prose, no markdown fences:
 {
   "remainingPii": [
     {"original": "exact string from the text", "category": "Name"},
-    {"original": "...", "category": "Address"}
+    {"original": "...", "category": "Phone"}
   ]
 }
 
-Allowed categories (use EXACTLY one of these — no others): Name, Address, Email, Phone, Date, Id.
-Anything that doesn't clearly fit one of those six must be omitted, not classified as a fallback.`;
+Allowed categories (use EXACTLY one of these — no others): Name, Email, Phone, Id.
+Anything that doesn't clearly fit one of those four must be omitted, not classified as a fallback.`;
 
     const messages = [
       new SystemMessage(systemPrompt),
@@ -482,10 +471,8 @@ Anything that doesn't clearly fit one of those six must be omitted, not classifi
 
       const allowed: ReadonlySet<PiiCategory> = new Set<PiiCategory>([
         'Name',
-        'Address',
         'Email',
         'Phone',
-        'Date',
         'Id',
       ]);
 

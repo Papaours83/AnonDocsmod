@@ -103,10 +103,8 @@ export class AnonymizationService {
       // Process chunks (parallel or sequential based on config)
       const allPiiDetected: AnonymizationResult['piiDetected'] = {
         names: [],
-        addresses: [],
         emails: [],
         phoneNumbers: [],
-        dates: [],
       };
 
       let results: AnonymizationResult[];
@@ -173,15 +171,11 @@ export class AnonymizationService {
           name: 'Name',
           names: 'Name',
           personname: 'Name',
-          address: 'Address',
-          addresses: 'Address',
           email: 'Email',
           emails: 'Email',
           phone: 'Phone',
           phonenumber: 'Phone',
           phonenumbers: 'Phone',
-          date: 'Date',
-          dates: 'Date',
           id: 'Id',
         };
         return mapping[raw] || null;
@@ -191,12 +185,9 @@ export class AnonymizationService {
         let chunkText = result.anonymizedText;
 
         if (result.piiDetected.names) allPiiDetected.names.push(...result.piiDetected.names);
-        if (result.piiDetected.addresses)
-          allPiiDetected.addresses.push(...result.piiDetected.addresses);
         if (result.piiDetected.emails) allPiiDetected.emails.push(...result.piiDetected.emails);
         if (result.piiDetected.phoneNumbers)
           allPiiDetected.phoneNumbers.push(...result.piiDetected.phoneNumbers);
-        if (result.piiDetected.dates) allPiiDetected.dates.push(...result.piiDetected.dates);
 
         const chunkReplacements = result.replacements || [];
         for (const rep of chunkReplacements) {
@@ -263,8 +254,8 @@ export class AnonymizationService {
       // Safety net: the LLM sometimes misses structured PII, especially when
       // a piece appears in only one chunk and the surrounding context is thin.
       // Scan the original text for well-defined patterns (phone, email, URL,
-      // SIRET, French street addresses) and add any match that isn't already
-      // covered. These run AFTER the LLM so they don't disturb its output.
+      // SIRET) and add any match that isn't already covered. These run AFTER
+      // the LLM so they don't disturb its output.
       this.augmentWithDeterministicPatterns(text, allReplacements, counters);
 
       // Combine anonymized chunks
@@ -467,17 +458,8 @@ export class AnonymizationService {
       },
       // SIRET (14 digits, with optional spacing every 3)
       { regex: /\b\d{3}[\s.]?\d{3}[\s.]?\d{3}[\s.]?\d{5}\b/g, category: 'Id' },
-      // French street addresses, e.g. "3 route de Montfavet", "292 Avenue du Prado"
-      {
-        regex:
-          /\b\d{1,4}(?:\s*(?:bis|ter|quater))?[,\s]+(?:rue|route|avenue|av\.?|boulevard|bd\.?|chemin|impasse|place|allée|allee|voie|passage|quai|cours)\s+(?:(?:de|du|des|de\s+la|de\s+l'|la|le|les|d')\s+)?[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][\wÀ-ÿ'\-\s]{1,60}/gi,
-        category: 'Address',
-      },
-      // French postal code + city, e.g. "13008 MARSEILLE", "84000 AVIGNON"
-      {
-        regex: /\b\d{5}\s+[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ\s\-']{2,}\b/g,
-        category: 'Address',
-      },
+      // Address-style patterns (street, postal code + city) are intentionally
+      // NOT included — addresses are out of scope for anonymization.
       // Person name — "Firstname LASTNAME" (e.g. "Michael HANN", "Vincent NICOLAS")
       {
         regex:
@@ -577,10 +559,8 @@ export class AnonymizationService {
 
     const categoryToBucket: Partial<Record<string, keyof AnonymizationResult['piiDetected']>> = {
       Name: 'names',
-      Address: 'addresses',
       Email: 'emails',
       Phone: 'phoneNumbers',
-      Date: 'dates',
     };
 
     let added = 0;
