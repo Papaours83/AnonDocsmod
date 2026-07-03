@@ -16,7 +16,10 @@
       "Bash(ls dist *)",
       "Bash(python -c ' *)",
       "Bash(python3 -)",
-      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,2\\)\\)\")"
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\(p.scripts,null,2\\)\\)\")",
+      "Bash(ollama list *)",
+      "PowerShell(if \\($LASTEXITCODE -ne 0\\) { \"docker indisponible\" })",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { $c | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; \"Port 3000 ECOUTE par: $\\($p.ProcessName\\) \\(PID $\\($p.Id\\)\\)\" } } else { \"Rien n'ecoute sur le port 3000\" })"
     ]
   }
 }

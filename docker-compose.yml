@@ -10,10 +10,11 @@ services:
     environment:
       - PORT=3000
       - NODE_ENV=production
-      - DEFAULT_LLM_PROVIDER=ollama
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_MODEL=mistral-nemo
-      - OLLAMA_TEMPERATURE=0
+      - DEFAULT_LLM_PROVIDER=openai
+      - OPENAI_BASE_URL=http://vllm.192.168.10.112.sslip.io/v1
+      - OPENAI_MODEL=qwen3-32B
+      - OPENAI_TEMPERATURE=0
+      - OPENAI_API_KEY=not-needed
       - CHUNK_SIZE=1500
       - CHUNK_OVERLAP=0
       - ENABLE_PARALLEL_CHUNKS=false
