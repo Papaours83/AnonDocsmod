@@ -27,7 +27,7 @@ export function errorHandler(
 
   // Custom file-filter errors (e.g. unsupported mime type) come through as
   // plain Error instances rejected by multer's fileFilter callback.
-  if (error.message?.includes('files are allowed')) {
+  if (error.message?.includes('files are allowed') || error.message?.includes('.doc')) {
     res.status(400).json({ error: 'Unsupported file type', message: error.message });
     return;
   }

@@ -4,6 +4,7 @@ import { parserService } from '../services/parser.service';
 import { docxFormatterService } from '../services/docx-formatter.service';
 import { LLMProvider } from '../services/llm.service';
 import fs from 'fs';
+import path from 'path';
 import JSZip from 'jszip';
 
 export class DocumentController {
@@ -23,8 +24,12 @@ export class DocumentController {
 
       const { provider } = req.body;
       const mimeType = req.file.mimetype;
+      // Route by MIME type, but fall back to the file extension: Windows often
+      // sends docx/pdf with a generic application/octet-stream MIME type.
+      const ext = path.extname(req.file.originalname).toLowerCase();
       const isDocx =
-        mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        ext === '.docx';
 
       // Validate provider if provided
       if (provider && !['openai', 'anthropic', 'ollama'].includes(provider)) {
@@ -35,7 +40,7 @@ export class DocumentController {
         return;
       }
 
-      const isPdf = mimeType === 'application/pdf';
+      const isPdf = mimeType === 'application/pdf' || ext === '.pdf';
       if (isDocx) {
         // Handle DOCX: preserve formatting
         await this.handleDocx(req, res, provider as LLMProvider);
