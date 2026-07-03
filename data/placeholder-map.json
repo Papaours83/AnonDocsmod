@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "state": {
+    "Name": {
+      "counter": 2,
+      "entries": {
+        "jean dupont": 1,
+        "marie martin": 2
+      }
+    },
+    "Email": {
+      "counter": 1,
+      "entries": {
+        "jean.dupont@maje.fr": 1
+      }
+    },
+    "Phone": {
+      "counter": 1,
+      "entries": {
+        "06 12 34 56 78": 1
+      }
+    }
+  }
+}

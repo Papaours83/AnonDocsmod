@@ -22,7 +22,11 @@
       "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { $c | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; \"Port 3000 ECOUTE par: $\\($p.ProcessName\\) \\(PID $\\($p.Id\\)\\)\" } } else { \"Rien n'ecoute sur le port 3000\" })",
       "Bash(ls -d \"d:/git repo/\"*/ 2>/dev/null)",
       "Read(//d/git repo/**)",
-      "PowerShell(npm run build 2>&1)"
+      "PowerShell(npm run build 2>&1)",
+      "PowerShell(npm install word-extractor 2>&1)",
+      "Bash(find \"d:/git repo\" -maxdepth 4 -iname \"*.doc\" -not -path \"*/node_modules/*\" 2>/dev/null | head -20)",
+      "Bash(node -e ' *)",
+      "Read(//d/git repo/home page maj/src/app/**)"
     ],
     "additionalDirectories": [
       "d:\\git repo\\home page maj\\src\\app"

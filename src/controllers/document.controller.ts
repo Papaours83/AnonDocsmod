@@ -41,12 +41,19 @@ export class DocumentController {
       }
 
       const isPdf = mimeType === 'application/pdf' || ext === '.pdf';
+      // Legacy binary Word (.doc). Detected by extension because Windows sends
+      // it as application/msword OR application/octet-stream. Must be checked
+      // AFTER docx (a .docx never has the .doc extension).
+      const isDoc = !isDocx && (mimeType === 'application/msword' || ext === '.doc');
       if (isDocx) {
         // Handle DOCX: preserve formatting
         await this.handleDocx(req, res, provider as LLMProvider);
       } else if (isPdf) {
         // Handle PDF: preserve layout via structured extraction
         await this.handlePdf(req, res, provider as LLMProvider);
+      } else if (isDoc) {
+        // Handle legacy .doc: text-only extraction (formatting not preserved)
+        await this.handleDoc(req, res, provider as LLMProvider);
       } else {
         // Handle TXT: plain text
         await this.handlePlainText(req, res, provider as LLMProvider);
@@ -197,6 +204,48 @@ export class DocumentController {
     );
 
     const baseName = req.file.originalname.replace(/\.txt$/i, '');
+    const anonOut = docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
+
+    const zip = new JSZip();
+    zip.file(`anonymized-${baseName}.txt`, fs.readFileSync(anonOut.filePath));
+    zip.file(
+      `pii-${baseName}.txt`,
+      fs.readFileSync(docxFormatterService.getFilePath(piiReport.filename))
+    );
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="anonymized-${baseName}.zip"`);
+    res.setHeader('X-Anonymized-Filename', anonOut.filename);
+    res.setHeader('X-Pii-Filename', piiReport.filename);
+    res.send(zipBuffer);
+  }
+
+  /**
+   * Handle legacy .doc files (Word 97-2003).
+   * mammoth cannot read the binary .doc format, so we extract plain text via
+   * word-extractor and return the anonymized result as .txt — the original
+   * .doc formatting is NOT preserved.
+   */
+  private async handleDoc(req: Request, res: Response, provider: LLMProvider): Promise<void> {
+    if (!req.file) return;
+
+    const text = await parserService.parseDoc(req.file.path);
+    fs.unlinkSync(req.file.path);
+
+    if (!text || text.trim().length === 0) {
+      res.status(400).json({ error: 'Could not extract text from document' });
+      return;
+    }
+
+    const result = await anonymizationService.anonymizeText(text, provider);
+
+    const piiReport = docxFormatterService.writePiiReport(
+      result.piiDetected as any,
+      result.replacements
+    );
+
+    const baseName = req.file.originalname.replace(/\.doc$/i, '');
     const anonOut = docxFormatterService.writeTextFile(result.anonymizedText, 'anonymized');
 
     const zip = new JSZip();

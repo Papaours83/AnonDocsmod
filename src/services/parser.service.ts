@@ -1,6 +1,7 @@
 import fs from 'fs';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
+import WordExtractor from 'word-extractor';
 
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
@@ -26,6 +27,8 @@ export interface PdfStructure {
 }
 
 export class ParserService {
+  private readonly wordExtractor = new WordExtractor();
+
   /**
    * Parse document based on mime type
    */
@@ -35,11 +38,23 @@ export class ParserService {
         return this.parsePdf(filePath);
       case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
         return this.parseDocx(filePath);
+      case 'application/msword':
+        return this.parseDoc(filePath);
       case 'text/plain':
         return this.parseTxt(filePath);
       default:
         throw new Error(`Unsupported file type: ${mimeType}`);
     }
+  }
+
+  /**
+   * Extract text from a legacy binary Word document (.doc, Word 97-2003).
+   * mammoth only handles .docx, so we use word-extractor here. Formatting is
+   * NOT preserved — callers should return the anonymized result as plain text.
+   */
+  async parseDoc(filePath: string): Promise<string> {
+    const doc = await this.wordExtractor.extract(filePath);
+    return doc.getBody();
   }
 
   private async parsePdf(filePath: string): Promise<string> {
