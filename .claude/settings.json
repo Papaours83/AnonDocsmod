@@ -26,7 +26,10 @@
       "PowerShell(npm install word-extractor 2>&1)",
       "Bash(find \"d:/git repo\" -maxdepth 4 -iname \"*.doc\" -not -path \"*/node_modules/*\" 2>/dev/null | head -20)",
       "Bash(node -e ' *)",
-      "Read(//d/git repo/home page maj/src/app/**)"
+      "Read(//d/git repo/home page maj/src/app/**)",
+      "Bash(git checkout *)",
+      "Bash(grep -n '\\\\\\\\s+' src/services/anonymization.service.ts)",
+      "Bash(python -)"
     ],
     "additionalDirectories": [
       "d:\\git repo\\home page maj\\src\\app"

@@ -444,7 +444,7 @@ export class AnonymizationService {
       // Person name — "Firstname LASTNAME" (e.g. "Michael HANN", "Vincent NICOLAS")
       {
         regex:
-          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)\s+([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)\b/g,
+          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)[  ]([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)\b/g,
         category: 'Name',
         minLen: 7,
         filter: (match) => {
@@ -459,7 +459,7 @@ export class AnonymizationService {
       // Person name — "LASTNAME Firstname" (common in French admin docs)
       {
         regex:
-          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)\s+([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)\b/g,
+          /\b([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]{3,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ]+)?)[  ]([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]{2,}(?:-[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸÇ][a-zà-ÿ]+)?)\b/g,
         category: 'Name',
         minLen: 7,
         filter: (match) => {
